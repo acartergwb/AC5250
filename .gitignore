@@ -1,1 +1,6 @@
 .acode/
+bin/
+obj/
+*.user
+*.suo
+.vs/

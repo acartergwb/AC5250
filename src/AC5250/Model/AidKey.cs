@@ -1,0 +1,38 @@
+namespace AC5250.Model;
+
+public enum AidKey : byte
+{
+    None = 0x00,
+    Enter = 0xF1,
+    F1 = 0x31,
+    F2 = 0x32,
+    F3 = 0x33,
+    F4 = 0x34,
+    F5 = 0x35,
+    F6 = 0x36,
+    F7 = 0x37,
+    F8 = 0x38,
+    F9 = 0x39,
+    F10 = 0x3A,
+    F11 = 0x3B,
+    F12 = 0x3C,
+    F13 = 0xB1,
+    F14 = 0xB2,
+    F15 = 0xB3,
+    F16 = 0xB4,
+    F17 = 0xB5,
+    F18 = 0xB6,
+    F19 = 0xB7,
+    F20 = 0xB8,
+    F21 = 0xB9,
+    F22 = 0xBA,
+    F23 = 0xBB,
+    F24 = 0xBC,
+    Clear = 0xBD,
+    Help = 0xF3,
+    Print = 0xF6,
+    PageUp = 0xF4,   // Roll Down in 5250 terms
+    PageDown = 0xF5, // Roll Up in 5250 terms
+    Attn = 0x70,
+    SysReq = 0x71,
+}
