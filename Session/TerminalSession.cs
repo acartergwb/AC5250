@@ -313,10 +313,17 @@ public class TerminalSession : IDisposable
         Screen.NotifyScreenChanged();
     }
 
+    private bool _firstDataReceived;
+
     private async void OnDataReceived(byte[] record)
     {
         try
         {
+            if (!_firstDataReceived)
+            {
+                _firstDataReceived = true;
+                StatusMessage?.Invoke($"Connected to {Settings.HostName}");
+            }
             await _parser.ParseRecordAsync(record);
         }
         catch (Exception ex)
