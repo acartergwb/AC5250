@@ -8,6 +8,7 @@ public class TelnetNegotiator
     private readonly Stream _stream;
     private bool _terminalTypeSent;
     private bool _environSent;
+    private bool _serverRequestedEnviron;
 
     public bool NegotiationComplete { get; private set; }
 
@@ -64,7 +65,7 @@ public class TelnetNegotiator
             }
         }
 
-        if (_terminalTypeSent && _environSent)
+        if (_terminalTypeSent && (_environSent || !_serverRequestedEnviron))
         {
             NegotiationComplete = true;
         }
@@ -91,6 +92,8 @@ public class TelnetNegotiator
             case TelnetConstants.OPT_EOR:
             case TelnetConstants.OPT_NEW_ENVIRON:
             case TelnetConstants.OPT_TN5250E:
+                if (option == TelnetConstants.OPT_NEW_ENVIRON)
+                    _serverRequestedEnviron = true;
                 await SendAsync(new[] { TelnetConstants.IAC, TelnetConstants.WILL, option }, ct);
                 break;
             default:
