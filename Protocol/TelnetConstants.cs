@@ -18,7 +18,6 @@ public static class TelnetConstants
     public const byte OPT_TERMINAL_TYPE = 0x18;
     public const byte OPT_EOR = 0x19;
     public const byte OPT_NEW_ENVIRON = 0x27;
-    public const byte OPT_TN5250E = 0x28;
 
     // Subnegotiation sub-commands
     public const byte TERMINAL_TYPE_IS = 0x00;
@@ -30,6 +29,7 @@ public static class TelnetConstants
     public const byte NEW_ENVIRON_INFO = 0x02;
     public const byte NEW_ENVIRON_VAR = 0x00;
     public const byte NEW_ENVIRON_VALUE = 0x01;
+    public const byte NEW_ENVIRON_ESC = 0x02;
     public const byte NEW_ENVIRON_USERVAR = 0x03;
 
     // 5250 data stream header

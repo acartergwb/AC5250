@@ -13,7 +13,6 @@ public class Tn5250Client : IDisposable
     private readonly ConnectionSettings _settings;
 
     public bool IsConnected => _tcpClient?.Connected == true;
-    public bool NegotiationComplete => _negotiator?.NegotiationComplete == true;
 
     public event Action<byte[]>? DataReceived;
     public event Action<string>? Disconnected;
@@ -59,7 +58,6 @@ public class Tn5250Client : IDisposable
         var buffer = new byte[32768];
         var recordBuffer = new List<byte>();
         bool inIac = false;
-        bool negotiating = true;
 
         try
         {
@@ -75,17 +73,6 @@ public class Tn5250Client : IDisposable
                 int i = 0;
                 while (i < bytesRead)
                 {
-                    // During negotiation, pass telnet commands to negotiator
-                    if (negotiating && !_negotiator!.NegotiationComplete)
-                    {
-                        await _negotiator.ProcessAsync(buffer, i, bytesRead - i, ct);
-                        if (_negotiator.NegotiationComplete)
-                        {
-                            negotiating = false;
-                        }
-                        break; // negotiator consumed all bytes
-                    }
-
                     byte b = buffer[i];
 
                     if (inIac)
@@ -108,29 +95,43 @@ public class Tn5250Client : IDisposable
                                 break;
 
                             case TelnetConstants.DO:
-                            case TelnetConstants.DONT:
-                            case TelnetConstants.WILL:
-                            case TelnetConstants.WONT:
-                                // Late telnet negotiation during data phase
                                 if (i + 1 < bytesRead)
                                 {
-                                    await HandleLateTelnetAsync(b, buffer[i + 1], ct);
-                                    i++; // skip option byte
+                                    await _negotiator!.HandleDoAsync(buffer[i + 1], ct);
+                                    i++;
                                 }
                                 break;
 
-                            case TelnetConstants.SB:
-                                // Subnegotiation during data phase
-                                int seIdx = FindSE(buffer, i + 1, bytesRead);
-                                if (seIdx >= 0 && _negotiator != null)
+                            case TelnetConstants.WILL:
+                                if (i + 1 < bytesRead)
                                 {
-                                    await _negotiator.ProcessAsync(buffer, i - 1, seIdx - i + 2, ct);
+                                    await _negotiator!.HandleWillAsync(buffer[i + 1], ct);
+                                    i++;
+                                }
+                                break;
+
+                            case TelnetConstants.DONT:
+                            case TelnetConstants.WONT:
+                                i++; // skip option byte
+                                break;
+
+                            case TelnetConstants.SB:
+                                int seIdx = FindSE(buffer, i + 1, bytesRead);
+                                if (seIdx >= 0)
+                                {
+                                    // Content between SB and IAC SE
+                                    int contentStart = i + 1;
+                                    int contentLen = seIdx - 1 - contentStart;
+                                    if (contentLen > 0)
+                                    {
+                                        await _negotiator!.HandleSubnegotiationAsync(
+                                            buffer, contentStart, contentLen, ct);
+                                    }
                                     i = seIdx;
                                 }
                                 break;
 
                             default:
-                                // Unknown telnet command, ignore
                                 break;
                         }
                     }
@@ -156,6 +157,9 @@ public class Tn5250Client : IDisposable
         }
     }
 
+    /// <summary>
+    /// Find IAC SE sequence. Returns the index of the SE byte.
+    /// </summary>
     private static int FindSE(byte[] buffer, int start, int end)
     {
         for (int i = start; i < end - 1; i++)
@@ -164,25 +168,6 @@ public class Tn5250Client : IDisposable
                 return i + 1;
         }
         return -1;
-    }
-
-    private async Task HandleLateTelnetAsync(byte cmd, byte option, CancellationToken ct)
-    {
-        if (_stream == null) return;
-
-        byte response = cmd switch
-        {
-            TelnetConstants.DO => TelnetConstants.WONT,
-            TelnetConstants.WILL => TelnetConstants.DONT,
-            _ => 0
-        };
-
-        if (response != 0)
-        {
-            var data = new[] { TelnetConstants.IAC, response, option };
-            await _stream.WriteAsync(data, ct);
-            await _stream.FlushAsync(ct);
-        }
     }
 
     public async Task SendRecordAsync(byte[] data, CancellationToken ct = default)
