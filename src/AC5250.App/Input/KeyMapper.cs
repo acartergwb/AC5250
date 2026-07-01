@@ -2,49 +2,9 @@ using AC5250.Model;
 
 namespace AC5250.Input;
 
-public enum KeyActionType
-{
-    None,
-    AidKey,
-    Character,
-    FieldExit,
-    FieldPlus,
-    FieldMinus,
-    Backspace,
-    Delete,
-    Home,
-    End,
-    Tab,
-    BackTab,
-    ArrowUp,
-    ArrowDown,
-    ArrowLeft,
-    ArrowRight,
-    Insert,
-    Reset,
-    EraseInput,
-    DupKey,
-}
-
-public readonly struct KeyAction
-{
-    public KeyActionType Type { get; }
-    public AidKey Aid { get; }
-    public char Character { get; }
-
-    private KeyAction(KeyActionType type, AidKey aid = AidKey.None, char ch = '\0')
-    {
-        Type = type;
-        Aid = aid;
-        Character = ch;
-    }
-
-    public static KeyAction FromAidKey(AidKey aid) => new(KeyActionType.AidKey, aid);
-    public static KeyAction FromChar(char ch) => new(KeyActionType.Character, ch: ch);
-    public static KeyAction FromType(KeyActionType type) => new(type);
-    public static readonly KeyAction Ignored = new(KeyActionType.None);
-}
-
+// KeyActionType and KeyAction now live in AC5250.Core (Input/KeyAction.cs) so the
+// engine and the MCP layer can produce input actions without a WinForms dependency.
+// This mapper (WinForms Keys -> KeyAction) stays in the desktop app.
 public static class KeyMapper
 {
     public static KeyAction Map(Keys keyData)
