@@ -112,6 +112,19 @@ public class ScreenBuffer
         _insertCursorCol = _bufferCol;
     }
 
+    public void WriteAttribute(byte displayAttr)
+    {
+        // A 5250 display attribute (0x20-0x3F) occupies a screen position as a
+        // blank and sets the display characteristics for the data that follows.
+        int pos = _bufferRow * Cols + _bufferCol;
+        if (pos >= 0 && pos < _characters.Length)
+        {
+            _characters[pos] = 0x40; // display as space
+            _attributes[pos] = displayAttr;
+        }
+        AdvanceBufferPosition();
+    }
+
     public void WriteCharacter(byte ebcdic)
     {
         int pos = _bufferRow * Cols + _bufferCol;

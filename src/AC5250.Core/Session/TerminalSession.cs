@@ -9,6 +9,8 @@ public class TerminalSession : IDisposable
     private readonly Tn5250Client _client;
     private readonly DataStreamParser _parser;
     private readonly SynchronizationContext? _dispatcher;
+    private readonly List<string> _debugLog = new();
+    private bool _firstDataReceived;
 
     /// <summary>Stable short id used by the MCP layer to address this session.</summary>
     public string Id { get; } = Guid.NewGuid().ToString("N")[..8];
@@ -38,6 +40,7 @@ public class TerminalSession : IDisposable
         _client.DataReceived += OnDataReceived;
         _client.Disconnected += OnDisconnected;
         _client.Error += OnError;
+        _client.DebugLog += OnDebugLog;
         _parser.SendResponse += OnSendResponse;
     }
 
@@ -378,6 +381,11 @@ public class TerminalSession : IDisposable
     {
         try
         {
+            if (!_firstDataReceived)
+            {
+                _firstDataReceived = true;
+                StatusMessage?.Invoke($"Connected to {Settings.HostName}");
+            }
             await _parser.ParseRecordAsync(record);
         }
         catch (Exception ex)
@@ -406,6 +414,17 @@ public class TerminalSession : IDisposable
     private void OnError(Exception ex)
     {
         StatusMessage?.Invoke($"Error: {ex.Message}");
+    }
+
+    private void OnDebugLog(string msg)
+    {
+        lock (_debugLog) _debugLog.Add($"[{DateTime.Now:HH:mm:ss.fff}] {msg}");
+    }
+
+    /// <summary>Snapshot of the connection/negotiation debug trace (thread-safe copy).</summary>
+    public IReadOnlyList<string> GetDebugLog()
+    {
+        lock (_debugLog) return _debugLog.ToArray();
     }
 
     public void Disconnect()

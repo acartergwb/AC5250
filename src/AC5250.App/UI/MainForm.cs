@@ -116,6 +116,8 @@ public class MainForm : Form
         var sessionMenu = CreateMenuItem("&Session");
         sessionMenu.DropDownItems.Add(CreateMenuItem("&New Session...", Keys.Control | Keys.T, OnConnect));
         sessionMenu.DropDownItems.Add(CreateMenuItem("&Close Session", Keys.Control | Keys.W, OnCloseSession));
+        sessionMenu.DropDownItems.Add(new ToolStripSeparator());
+        sessionMenu.DropDownItems.Add(CreateMenuItem("&Debug Log...", Keys.Control | Keys.Shift | Keys.D, OnShowDebugLog));
         menu.Items.Add(sessionMenu);
 
         var viewMenu = CreateMenuItem("&View");
@@ -250,6 +252,44 @@ public class MainForm : Form
             return;
         }
         using var dlg = new McpInfoDialog(_mcpHost);
+        dlg.ShowDialog(this);
+    }
+
+    private void OnShowDebugLog(object? sender, EventArgs e)
+    {
+        var session = _sessionManager.ActiveSession;
+        if (session == null)
+        {
+            MessageBox.Show("No active session.", "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var log = session.GetDebugLog();
+        var text = log.Count == 0 ? "(no data received yet)" : string.Join(Environment.NewLine, log);
+
+        using var dlg = new Form
+        {
+            Text = "Debug Log — connection & negotiation trace",
+            Size = new Size(820, 520),
+            StartPosition = FormStartPosition.CenterParent,
+            BackColor = DarkTheme.Surface,
+            ForeColor = DarkTheme.TextPrimary,
+        };
+        dlg.HandleCreated += (_, _) => ApplyDarkTitleBar(dlg);
+
+        var tb = new TextBox
+        {
+            Multiline = true,
+            ReadOnly = true,
+            ScrollBars = ScrollBars.Both,
+            Dock = DockStyle.Fill,
+            Font = new Font("Consolas", 9f),
+            BackColor = DarkTheme.Background,
+            ForeColor = DarkTheme.TextPrimary,
+            WordWrap = false,
+            Text = text,
+        };
+        dlg.Controls.Add(tb);
         dlg.ShowDialog(this);
     }
 

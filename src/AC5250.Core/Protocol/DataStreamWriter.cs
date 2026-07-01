@@ -9,7 +9,12 @@ public static class DataStreamWriter
         var data = new List<byte>();
 
         // 5250 data stream header (10 bytes)
-        data.AddRange(new byte[] { 0x00, 0x00, 0x12, 0xA0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 });
+        // Bytes 0-1: record length (filled later)
+        // Bytes 2-3: 0x12 0xA0 (GDS variable length record)
+        // Bytes 4-5: reserved
+        // Byte 6: 0x04 (variable header length)
+        // Bytes 7-9: flags/opcode (0x00 for response)
+        data.AddRange(new byte[] { 0x00, 0x00, 0x12, 0xA0, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00 });
 
         // Row and column of cursor (1-based)
         data.Add((byte)(screen.CursorRow + 1));

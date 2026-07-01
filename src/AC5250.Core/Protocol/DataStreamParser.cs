@@ -6,6 +6,9 @@ public class DataStreamParser
 {
     private readonly ScreenBuffer _screen;
 
+    // 5250 escape byte that precedes command codes in the data stream
+    private const byte ESC = 0x04;
+
     public event Func<byte[], Task>? SendResponse;
 
     public DataStreamParser(ScreenBuffer screen)
@@ -33,8 +36,20 @@ public class DataStreamParser
         switch (opcode)
         {
             case TelnetConstants.OPCODE_OUTPUT:
+                ParseOutput(record, TelnetConstants.HEADER_LENGTH);
+                break;
+
             case TelnetConstants.OPCODE_PUT_GET:
                 ParseOutput(record, TelnetConstants.HEADER_LENGTH);
+                // PUT_GET = output + invite: unlock keyboard and position cursor
+                _screen.InputInhibited = false;
+                if (_screen.CursorRow == 0 && _screen.CursorCol == 0)
+                {
+                    var firstField = _screen.GetNextInputField(0, 0);
+                    if (firstField != null)
+                        _screen.MoveCursorTo(firstField.Row, firstField.Col);
+                }
+                _screen.NotifyScreenChanged();
                 break;
 
             case TelnetConstants.OPCODE_INVITE:
@@ -74,37 +89,49 @@ public class DataStreamParser
         {
             byte b = record[offset];
 
-            switch (b)
+            if (b == ESC)
             {
-                case TelnetConstants.CMD_CLEAR_UNIT:
-                case TelnetConstants.CMD_CLEAR_UNIT_ALT:
-                    _screen.Clear();
-                    offset++;
-                    break;
+                // Escape byte: next byte is a command code
+                offset++;
+                if (offset >= record.Length) break;
 
-                case TelnetConstants.CMD_CLEAR_FORMAT_TABLE:
-                    _screen.ClearFormatTable();
-                    offset++;
-                    break;
+                byte cmd = record[offset];
+                switch (cmd)
+                {
+                    case TelnetConstants.CMD_CLEAR_UNIT:
+                    case TelnetConstants.CMD_CLEAR_UNIT_ALT:
+                        _screen.Clear();
+                        offset++;
+                        break;
 
-                case TelnetConstants.CMD_WRITE_TO_DISPLAY:
-                    offset = ParseWriteToDisplay(record, offset + 1);
-                    break;
+                    case TelnetConstants.CMD_CLEAR_FORMAT_TABLE:
+                        _screen.ClearFormatTable();
+                        offset++;
+                        break;
 
-                case TelnetConstants.CMD_WRITE_STRUCTURED_FIELD:
-                    offset = ParseWriteStructuredField(record, offset + 1);
-                    break;
+                    case TelnetConstants.CMD_WRITE_TO_DISPLAY:
+                        offset = ParseWriteToDisplay(record, offset + 1);
+                        break;
 
-                case TelnetConstants.CMD_READ_MDT_FIELDS:
-                case TelnetConstants.CMD_READ_INPUT_FIELDS:
-                case TelnetConstants.CMD_READ_SCREEN:
-                    // These are handled at the opcode level (PUT_GET)
-                    offset = record.Length; // consume remaining
-                    break;
+                    case TelnetConstants.CMD_WRITE_STRUCTURED_FIELD:
+                        offset = ParseWriteStructuredField(record, offset + 1);
+                        break;
 
-                default:
-                    offset++;
-                    break;
+                    case TelnetConstants.CMD_READ_MDT_FIELDS:
+                    case TelnetConstants.CMD_READ_INPUT_FIELDS:
+                    case TelnetConstants.CMD_READ_SCREEN:
+                        offset = record.Length; // consume remaining
+                        break;
+
+                    default:
+                        offset++;
+                        break;
+                }
+            }
+            else
+            {
+                // Non-escape byte outside a command — skip
+                offset++;
             }
         }
 
@@ -125,22 +152,14 @@ public class DataStreamParser
         if ((cc1 & 0x20) != 0) _screen.ResetMDT();
         if ((cc1 & 0x40) != 0) _screen.ClearFormatTable();
 
-        // Parse orders and data
+        // Parse orders and data until ESC (new command) or end of record
         while (offset < record.Length)
         {
             byte b = record[offset];
 
-            // Check if this is a new command (not an order)
-            if (b == TelnetConstants.CMD_WRITE_TO_DISPLAY ||
-                b == TelnetConstants.CMD_CLEAR_UNIT ||
-                b == TelnetConstants.CMD_CLEAR_UNIT_ALT ||
-                b == TelnetConstants.CMD_CLEAR_FORMAT_TABLE ||
-                b == TelnetConstants.CMD_WRITE_STRUCTURED_FIELD ||
-                b == TelnetConstants.CMD_READ_MDT_FIELDS ||
-                b == TelnetConstants.CMD_READ_INPUT_FIELDS)
-            {
-                break; // let the outer loop handle it
-            }
+            // ESC byte signals a new command — return to outer loop
+            if (b == ESC)
+                break;
 
             switch (b)
             {
@@ -194,8 +213,17 @@ public class DataStreamParser
                     break;
 
                 default:
-                    // Regular data byte - write to screen
-                    _screen.WriteCharacter(b);
+                    if (b >= 0x20 && b <= 0x3F)
+                    {
+                        // Display attribute byte — occupies a screen position as a blank
+                        // and sets display characteristics for following data
+                        _screen.WriteAttribute(b);
+                    }
+                    else
+                    {
+                        // Regular EBCDIC data byte - write to screen
+                        _screen.WriteCharacter(b);
+                    }
                     offset++;
                     break;
             }
@@ -325,7 +353,7 @@ public class DataStreamParser
 
         // Record header (10 bytes)
         // Will be filled in by caller or we build a complete record
-        data.AddRange(new byte[] { 0x00, 0x00, 0x12, 0xA0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 });
+        data.AddRange(new byte[] { 0x00, 0x00, 0x12, 0xA0, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00 });
 
         // Query reply structured field
         var sf = new List<byte>();

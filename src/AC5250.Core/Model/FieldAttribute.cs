@@ -45,17 +45,23 @@ public class FieldAttribute
             _ => FieldFormat.AlphaShift,
         };
 
-        // Attribute byte - display characteristics
-        // Bits 0-2: column separator / underline
-        // Bits 3-6: highlight
-        int highlight = (attr >> 1) & 0x07;
+        // Attribute byte - 5250 display characteristics
+        // Low 3 bits (0-2) determine display mode:
+        //   000 = Normal
+        //   001 = Reverse image
+        //   010 = High intensity
+        //   011 = High intensity + Reverse
+        //   100 = Underline
+        //   101 = Underline + Reverse
+        //   110 = High intensity + Underline
+        //   111 = Non-display
+        int mode = attr & 0x07;
 
-        fa.IsNonDisplay = highlight == 0x07;
-        fa.IsHighIntensity = highlight == 0x02 || highlight == 0x04;
-        fa.IsUnderline = (attr & 0x04) != 0;
-        fa.IsColumnSeparator = (attr & 0x02) != 0;
-        fa.IsReverse = highlight == 0x04;
-        fa.IsBlink = highlight == 0x03;
+        fa.IsNonDisplay = mode == 0x07;
+        fa.IsReverse = (mode & 0x01) != 0 && !fa.IsNonDisplay;
+        fa.IsHighIntensity = (mode & 0x02) != 0 && !fa.IsNonDisplay;
+        fa.IsUnderline = (mode & 0x04) != 0 && !fa.IsNonDisplay;
+        fa.IsColumnSeparator = (attr & 0x08) != 0;
 
         return fa;
     }
