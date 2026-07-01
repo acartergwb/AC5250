@@ -38,6 +38,13 @@ public class ScreenBuffer
 
     public event Action? ScreenChanged;
 
+    /// <summary>
+    /// Monotonically increments on every screen change. The MCP layer snapshots
+    /// this before sending an AID key and waits for it to advance to know the
+    /// host has painted a new screen ("screen settled").
+    /// </summary>
+    public long Version { get; private set; }
+
     public ScreenBuffer(int rows, int cols)
     {
         Rows = rows;
@@ -57,6 +64,7 @@ public class ScreenBuffer
             _insertCursorRow = -1;
             _insertCursorCol = -1;
         }
+        Version++;
         ScreenChanged?.Invoke();
     }
 
@@ -269,6 +277,7 @@ public class ScreenBuffer
     {
         CursorRow = Math.Clamp(row, 0, Rows - 1);
         CursorCol = Math.Clamp(col, 0, Cols - 1);
+        Version++;
         ScreenChanged?.Invoke();
     }
 

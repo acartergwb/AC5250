@@ -7,13 +7,16 @@ public class SessionManager
     public IReadOnlyList<TerminalSession> Sessions => _sessions;
     public TerminalSession? ActiveSession { get; private set; }
 
+    public TerminalSession? FindById(string id) =>
+        _sessions.FirstOrDefault(s => s.Id == id);
+
     public event Action<TerminalSession>? SessionAdded;
     public event Action<TerminalSession>? SessionRemoved;
     public event Action<TerminalSession?>? ActiveSessionChanged;
 
-    public TerminalSession CreateSession(ConnectionSettings settings)
+    public TerminalSession CreateSession(ConnectionSettings settings, SynchronizationContext? dispatcher = null)
     {
-        var session = new TerminalSession(settings);
+        var session = new TerminalSession(settings, dispatcher);
         _sessions.Add(session);
         SessionAdded?.Invoke(session);
 

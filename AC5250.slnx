@@ -2,5 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/AC5250.App/AC5250.App.csproj" />
     <Project Path="src/AC5250.Core/AC5250.Core.csproj" />
+    <Project Path="src/AC5250.Headless/AC5250.Headless.csproj" />
+    <Project Path="src/AC5250.Mcp/AC5250.Mcp.csproj" />
   </Folder>
 </Solution>

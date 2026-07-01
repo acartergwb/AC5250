@@ -8,6 +8,10 @@ public class TerminalSession : IDisposable
 {
     private readonly Tn5250Client _client;
     private readonly DataStreamParser _parser;
+    private readonly SynchronizationContext? _dispatcher;
+
+    /// <summary>Stable short id used by the MCP layer to address this session.</summary>
+    public string Id { get; } = Guid.NewGuid().ToString("N")[..8];
 
     public ConnectionSettings Settings { get; }
     public ScreenBuffer Screen { get; }
@@ -17,9 +21,10 @@ public class TerminalSession : IDisposable
     public event Action<string>? ConnectionClosed;
     public event Action<string>? StatusMessage;
 
-    public TerminalSession(ConnectionSettings settings)
+    public TerminalSession(ConnectionSettings settings, SynchronizationContext? dispatcher = null)
     {
         Settings = settings;
+        _dispatcher = dispatcher;
         Title = settings.DisplayName;
 
         int rows = settings.ScreenSize == ScreenSize.Wide ? 27 : 24;
@@ -168,6 +173,51 @@ public class TerminalSession : IDisposable
         Screen.NotifyScreenChanged();
     }
 
+    /// <summary>
+    /// Programmatically set an input field's value (used by the MCP layer).
+    /// Positions the cursor at the field, optionally clears it, then types the
+    /// value through the normal input path. Stops at the field boundary so it
+    /// never overflows into the next field. Returns false if input is inhibited
+    /// or the index is not a usable (non-bypass) input field.
+    /// </summary>
+    public bool SetFieldValue(int fieldIndex, string value, bool clearFirst = true)
+    {
+        if (Screen.InputInhibited) return false;
+        if (fieldIndex < 0 || fieldIndex >= Screen.Fields.Count) return false;
+
+        var field = Screen.Fields[fieldIndex];
+        if (field.Attribute.IsBypass) return false;
+
+        Screen.MoveCursorTo(field.Row, field.Col);
+
+        if (clearFirst)
+        {
+            field.ClearData();
+            Screen.SyncFieldToBuffer(field);
+        }
+
+        foreach (char ch in value)
+        {
+            if (Screen.GetFieldForCursor() != field) break; // don't spill into the next field
+            HandleCharacterInput(ch);
+        }
+
+        Screen.NotifyScreenChanged();
+        return true;
+    }
+
+    /// <summary>
+    /// Type a string at the current cursor position, character by character
+    /// (used by the MCP layer's send_text). Honors field boundaries and the
+    /// current insert/overtype mode via the normal input path.
+    /// </summary>
+    public void TypeString(string text)
+    {
+        if (Screen.InputInhibited) return;
+        foreach (char ch in text)
+            HandleCharacterInput(ch);
+    }
+
     private void HandleBackspace()
     {
         if (Screen.InputInhibited) return;
@@ -311,7 +361,20 @@ public class TerminalSession : IDisposable
         Screen.NotifyScreenChanged();
     }
 
-    private async void OnDataReceived(byte[] record)
+    private void OnDataReceived(byte[] record)
+    {
+        // If a dispatcher was supplied (the WinForms UI thread for the desktop
+        // app, or the single-thread dispatcher for the headless host), marshal
+        // parsing onto it so host-driven screen mutation is serialized with
+        // input handling and rendering. Otherwise parse inline on the socket
+        // thread (original behavior, preserved when no dispatcher is set).
+        if (_dispatcher != null)
+            _dispatcher.Post(_ => ApplyRecord(record), null);
+        else
+            ApplyRecord(record);
+    }
+
+    private async void ApplyRecord(byte[] record)
     {
         try
         {
