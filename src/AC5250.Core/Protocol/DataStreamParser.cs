@@ -258,14 +258,23 @@ public class DataStreamParser
 
     private int ParseStartOfField(byte[] record, int offset)
     {
-        // SF: FFW (2 bytes) + FCW (optional 2 bytes) + attribute byte + field length (2 bytes)
-        if (offset + 4 >= record.Length) return record.Length;
+        // SF layout: FFW (2 bytes) + zero or more FCW pairs (2 bytes each) +
+        //            attribute byte (0x20-0x3F) + field length (2 bytes, big-endian).
+        if (offset + 1 >= record.Length) return record.Length;
 
         byte ffw1 = record[offset];
         byte ffw2 = record[offset + 1];
         offset += 2;
 
-        // Check for optional FCW (Field Control Word)
+        // Skip any Field Control Words. FCWs sit between the FFW and the attribute
+        // byte; the attribute byte is the first byte in the 0x20-0x3F range. Without
+        // this, screens whose fields carry FCWs (e.g. command prompts like CHGUSRPRF)
+        // misread the attribute + length, producing over-long fields and a shifted
+        // screen. Fields without FCWs (e.g. the sign-on) are unaffected.
+        while (offset + 1 < record.Length && (record[offset] < 0x20 || record[offset] > 0x3F))
+            offset += 2;
+
+        if (offset >= record.Length) return record.Length;
         byte attr = record[offset];
         offset++;
 
