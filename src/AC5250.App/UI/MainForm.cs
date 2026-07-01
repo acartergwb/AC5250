@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using AC5250.Hosting;
 using AC5250.Input;
 using AC5250.Rendering;
 using AC5250.Session;
@@ -21,8 +22,17 @@ public class MainForm : Form
     private readonly Dictionary<TerminalSession, TerminalControl> _sessionControls = new();
     private TerminalControl? _activeControl;
 
-    public MainForm()
+    // MCP in-process host (started on demand via the Tools menu, or at launch with --mcp).
+    private const int McpPort = 8250;
+    private McpHost? _mcpHost;
+    private SynchronizationContext? _uiContext;
+    private readonly McpStartupOptions? _mcpStartup;
+    private int EffectivePort => _mcpStartup?.Port ?? McpPort;
+
+    public MainForm(McpStartupOptions? mcpStartup = null)
     {
+        _mcpStartup = mcpStartup;
+
         Text = "AC5250";
         Size = new Size(960, 700);
         MinimumSize = new Size(640, 480);
@@ -116,6 +126,13 @@ public class MainForm : Form
         viewMenu.DropDownItems.Add(colorMenu);
         menu.Items.Add(viewMenu);
 
+        var toolsMenu = CreateMenuItem("&Tools");
+        toolsMenu.DropDownItems.Add(CreateMenuItem("&Start MCP Server", Keys.Control | Keys.M, OnStartMcp));
+        toolsMenu.DropDownItems.Add(CreateMenuItem("S&top MCP Server", onClick: OnStopMcp));
+        toolsMenu.DropDownItems.Add(new ToolStripSeparator());
+        toolsMenu.DropDownItems.Add(CreateMenuItem("MCP Connection &Info...", onClick: OnMcpInfo));
+        menu.Items.Add(toolsMenu);
+
         var helpMenu = CreateMenuItem("&Help");
         helpMenu.DropDownItems.Add(CreateMenuItem("&Key Mappings", Keys.F1, OnKeyMappings));
         helpMenu.DropDownItems.Add(new ToolStripSeparator());
@@ -144,7 +161,8 @@ public class MainForm : Form
 
         HideWelcome();
 
-        var session = _sessionManager.CreateSession(dialog.Settings);
+        _uiContext ??= SynchronizationContext.Current;
+        var session = _sessionManager.CreateSession(dialog.Settings, _uiContext);
 
         try
         {
@@ -166,6 +184,74 @@ public class MainForm : Form
     }
 
     private void OnCloseSession(object? sender, EventArgs e) => OnDisconnect(sender, e);
+
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+        // Capture the WinForms synchronization context; sessions and the MCP host
+        // use it to marshal host-driven parsing and MCP calls onto this thread.
+        _uiContext = SynchronizationContext.Current;
+
+        if (_mcpStartup?.AutoStart == true)
+            _ = StartMcpAsync(_mcpStartup.Token);
+    }
+
+    private async void OnStartMcp(object? sender, EventArgs e)
+    {
+        if (_mcpHost != null) { OnMcpInfo(sender, e); return; }
+
+        if (await StartMcpAsync(null) && _mcpHost != null)
+        {
+            using var dlg = new McpInfoDialog(_mcpHost);
+            dlg.ShowDialog(this);
+        }
+    }
+
+    private async Task<bool> StartMcpAsync(string? token)
+    {
+        _uiContext ??= SynchronizationContext.Current;
+        try
+        {
+            var host = new McpHost(_sessionManager, this, _uiContext!, EffectivePort, token);
+            await host.StartAsync();
+            _mcpHost = host;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                $"Could not start the MCP server on 127.0.0.1:{EffectivePort}.\n\n{ex.Message}",
+                "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return false;
+        }
+    }
+
+    private async void OnStopMcp(object? sender, EventArgs e)
+    {
+        if (_mcpHost == null)
+        {
+            MessageBox.Show("MCP server is not running.", "AC5250",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        var host = _mcpHost;
+        _mcpHost = null;
+        await host.DisposeAsync();
+        MessageBox.Show("MCP server stopped.", "AC5250",
+            MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private void OnMcpInfo(object? sender, EventArgs e)
+    {
+        if (_mcpHost == null)
+        {
+            MessageBox.Show("MCP server is not running. Use Tools → Start MCP Server.",
+                "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        using var dlg = new McpInfoDialog(_mcpHost);
+        dlg.ShowDialog(this);
+    }
 
     private void OnSessionAdded(TerminalSession session)
     {
@@ -339,6 +425,11 @@ public class MainForm : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        if (_mcpHost != null)
+        {
+            try { _mcpHost.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(3)); } catch { /* shutting down */ }
+            _mcpHost = null;
+        }
         _sessionManager.CloseAll();
         base.OnFormClosing(e);
     }

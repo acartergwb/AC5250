@@ -10,5 +10,9 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\AC5250.Core\AC5250.Core.csproj" />
+    <ProjectReference Include="..\AC5250.Mcp\AC5250.Mcp.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.4.0" />
   </ItemGroup>
 </Project>
