@@ -4,6 +4,7 @@ namespace AC5250.UI;
 
 public class ConnectDialog : Form
 {
+    private TextBox _sessionNameBox = null!;
     private TextBox _hostBox = null!;
     private NumericUpDown _portBox = null!;
     private CheckBox _sslCheck = null!;
@@ -26,48 +27,49 @@ public class ConnectDialog : Form
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterParent;
-        Size = new Size(440, 360);
         BackColor = DarkTheme.Surface;
         ForeColor = DarkTheme.TextPrimary;
         Font = DarkTheme.UIFont;
 
         HandleCreated += (_, _) => MainForm.ApplyDarkTitleBar(this);
 
+        const int labelLeft = 24;
+        const int controlLeft = 150;
+        const int controlWidth = 264;
+        const int rowHeight = 36;
+        const int contentRight = controlLeft + controlWidth; // 414
+
         // Title header
-        var header = new Label
+        Controls.Add(new Label
         {
             Text = "New Connection",
             Font = new Font("Segoe UI", 14f, FontStyle.Bold),
             ForeColor = DarkTheme.TextPrimary,
-            Location = new Point(24, 16),
+            Location = new Point(labelLeft, 16),
             AutoSize = true,
-        };
-        Controls.Add(header);
-
-        var subtitle = new Label
+        });
+        Controls.Add(new Label
         {
             Text = "Enter the connection details for your IBM AS/400 system.",
             Font = DarkTheme.UIFont,
             ForeColor = DarkTheme.TextSecondary,
-            Location = new Point(24, 44),
+            Location = new Point(labelLeft, 44),
             AutoSize = true,
-        };
-        Controls.Add(subtitle);
-
-        // Divider
-        var divider = new Panel
+        });
+        Controls.Add(new Panel
         {
-            Location = new Point(24, 68),
-            Size = new Size(390, 1),
+            Location = new Point(labelLeft, 68),
+            Size = new Size(contentRight - labelLeft, 1),
             BackColor = DarkTheme.BorderSubtle,
-        };
-        Controls.Add(divider);
+        });
 
         int y = 82;
-        int labelLeft = 24;
-        int controlLeft = 140;
-        int controlWidth = 260;
-        int rowHeight = 36;
+
+        // Session Name
+        AddLabel("Session Name", labelLeft, y);
+        _sessionNameBox = CreateTextBox(controlLeft, y, controlWidth);
+        _sessionNameBox.PlaceholderText = "optional label for the tab";
+        y += rowHeight;
 
         // Host
         AddLabel("Host", labelLeft, y);
@@ -106,10 +108,10 @@ public class ConnectDialog : Form
         Controls.Add(_sslCheck);
         y += rowHeight;
 
-        // Device Name
-        AddLabel("Device Name", labelLeft, y);
+        // Workstation ID (5250 device name)
+        AddLabel("Workstation ID", labelLeft, y);
         _deviceBox = CreateTextBox(controlLeft, y, controlWidth);
-        _deviceBox.PlaceholderText = "auto-assign if blank";
+        _deviceBox.PlaceholderText = "blank = auto-assign; NAME* to keep unique";
         y += rowHeight;
 
         // Screen Size
@@ -130,35 +132,21 @@ public class ConnectDialog : Form
         y += rowHeight + 16;
 
         // Bottom divider
-        var divider2 = new Panel
+        Controls.Add(new Panel
         {
-            Location = new Point(24, y),
-            Size = new Size(390, 1),
+            Location = new Point(labelLeft, y),
+            Size = new Size(contentRight - labelLeft, 1),
             BackColor = DarkTheme.BorderSubtle,
-        };
-        Controls.Add(divider2);
-        y += 12;
+        });
+        y += 14;
 
-        // Buttons
-        _cancelButton = new Button
-        {
-            Text = "Cancel",
-            DialogResult = DialogResult.Cancel,
-            Location = new Point(240, y),
-            Size = new Size(80, 32),
-            FlatStyle = FlatStyle.Flat,
-            BackColor = DarkTheme.SurfaceLighter,
-            ForeColor = DarkTheme.TextPrimary,
-            Font = DarkTheme.UIFont,
-        };
-        _cancelButton.FlatAppearance.BorderColor = DarkTheme.Border;
-        Controls.Add(_cancelButton);
-
+        // Buttons (right-aligned to the content edge)
+        int buttonY = y;
         _okButton = new Button
         {
             Text = "Connect",
             DialogResult = DialogResult.OK,
-            Location = new Point(328, y),
+            Location = new Point(contentRight - 86, buttonY),
             Size = new Size(86, 32),
             FlatStyle = FlatStyle.Flat,
             BackColor = DarkTheme.AccentDim,
@@ -168,6 +156,25 @@ public class ConnectDialog : Form
         _okButton.FlatAppearance.BorderColor = DarkTheme.Accent;
         _okButton.Click += OnOkClick;
         Controls.Add(_okButton);
+
+        _cancelButton = new Button
+        {
+            Text = "Cancel",
+            DialogResult = DialogResult.Cancel,
+            Location = new Point(contentRight - 86 - 8 - 80, buttonY),
+            Size = new Size(80, 32),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = DarkTheme.SurfaceLighter,
+            ForeColor = DarkTheme.TextPrimary,
+            Font = DarkTheme.UIFont,
+        };
+        _cancelButton.FlatAppearance.BorderColor = DarkTheme.Border;
+        Controls.Add(_cancelButton);
+
+        // Size the form to its content, leaving a margin below the buttons so they
+        // never sit flush against the window edge. ClientSize excludes the title
+        // bar/borders, so this math is exact regardless of the OS chrome.
+        ClientSize = new Size(contentRight + labelLeft, buttonY + 32 + 20);
 
         AcceptButton = _okButton;
         CancelButton = _cancelButton;
@@ -218,6 +225,7 @@ public class ConnectDialog : Form
             Port = (int)_portBox.Value,
             UseSsl = _sslCheck.Checked,
             DeviceName = _deviceBox.Text.Trim(),
+            SessionName = _sessionNameBox.Text.Trim(),
             ScreenSize = _sizeBox.SelectedIndex == 1 ? ScreenSize.Wide : ScreenSize.Normal,
         };
     }
