@@ -41,9 +41,12 @@ public class DataStreamParser
 
             case TelnetConstants.OPCODE_PUT_GET:
                 ParseOutput(record, TelnetConstants.HEADER_LENGTH);
-                // PUT_GET = output + invite: unlock keyboard and position cursor
+                // PUT_GET = output + invite: unlock keyboard and position cursor.
                 _screen.InputInhibited = false;
-                if (_screen.CursorRow == 0 && _screen.CursorCol == 0)
+                // If the host didn't leave the cursor on an enterable field, drop it
+                // onto the first input field so the operator can type without Tab.
+                var cursorField = _screen.GetFieldForCursor();
+                if (cursorField == null || cursorField.Attribute.IsBypass)
                 {
                     var firstField = _screen.GetNextInputField(0, 0);
                     if (firstField != null)

@@ -15,6 +15,12 @@ public class TerminalSession : IDisposable
     /// <summary>Stable short id used by the MCP layer to address this session.</summary>
     public string Id { get; } = Guid.NewGuid().ToString("N")[..8];
 
+    /// <summary>
+    /// When true, typed letters are uppercased (except in non-display/password
+    /// fields), matching the ACS "monocase" behavior most green-screen apps expect.
+    /// </summary>
+    public bool UppercaseInput { get; set; } = true;
+
     public ConnectionSettings Settings { get; }
     public ScreenBuffer Screen { get; }
     public bool IsConnected => _client.IsConnected;
@@ -159,6 +165,11 @@ public class TerminalSession : IDisposable
 
         int idx = field.GetIndexForPosition(Screen.CursorRow, Screen.CursorCol, Screen.Cols);
         if (idx < 0 || idx >= field.Length) return;
+
+        // Monocase: uppercase letters unless this is a hidden (password) field,
+        // where case must be preserved.
+        if (UppercaseInput && !field.Attribute.IsNonDisplay)
+            ch = char.ToUpperInvariant(ch);
 
         byte ebcdic = Ebcdic.FromAscii(ch);
 

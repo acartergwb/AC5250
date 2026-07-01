@@ -148,11 +148,14 @@ public class ScreenBuffer
 
     public void DefineField(FieldAttribute attr, int length)
     {
-        // The attribute byte occupies the current buffer position
+        // The attribute byte occupies the current buffer position. Store the real
+        // 5250 display-attribute byte (0x20-0x3F) so the renderer can color the
+        // field's text; a field attribute always displays as a blank.
         int attrPos = _bufferRow * Cols + _bufferCol;
         if (attrPos >= 0 && attrPos < _attributes.Length)
         {
-            _attributes[attrPos] = 0xFF; // mark as field attribute position
+            byte raw = attr.Raw;
+            _attributes[attrPos] = (raw >= 0x20 && raw <= 0x3F) ? raw : (byte)0x20;
         }
 
         // Field data starts at the next position
@@ -222,7 +225,25 @@ public class ScreenBuffer
     {
         int pos = row * Cols + col;
         if (pos < 0 || pos >= _attributes.Length) return false;
-        return _attributes[pos] == 0xFF;
+        byte a = _attributes[pos];
+        return a >= 0x20 && a <= 0x3F; // a 5250 attribute byte occupies this cell
+    }
+
+    /// <summary>The 5250 attribute byte stored at a position (0 if none).</summary>
+    public byte GetAttributeByteAt(int row, int col)
+    {
+        int pos = row * Cols + col;
+        if (pos < 0 || pos >= _attributes.Length) return 0;
+        return _attributes[pos];
+    }
+
+    /// <summary>True if a field begins exactly at this position (i.e. the preceding
+    /// cell holds that field's leading attribute byte).</summary>
+    public bool IsFieldStart(int row, int col)
+    {
+        foreach (var f in Fields)
+            if (f.Row == row && f.Col == col) return true;
+        return false;
     }
 
     public ScreenField? GetFieldAt(int row, int col)

@@ -29,6 +29,9 @@ public class MainForm : Form
     private readonly McpStartupOptions? _mcpStartup;
     private int EffectivePort => _mcpStartup?.Port ?? McpPort;
 
+    private bool _uppercaseInput = true;
+    private ToolStripMenuItem? _uppercaseMenuItem;
+
     public MainForm(McpStartupOptions? mcpStartup = null)
     {
         _mcpStartup = mcpStartup;
@@ -122,10 +125,15 @@ public class MainForm : Form
 
         var viewMenu = CreateMenuItem("&View");
         var colorMenu = CreateMenuItem("Color &Scheme");
+        colorMenu.DropDownItems.Add(CreateMenuItem("&Color (ACS)", onClick: (_, _) => SetColorScheme(ColorScheme.Color5250)));
         colorMenu.DropDownItems.Add(CreateMenuItem("Classic &Green", onClick: (_, _) => SetColorScheme(ColorScheme.Classic)));
         colorMenu.DropDownItems.Add(CreateMenuItem("&Amber", onClick: (_, _) => SetColorScheme(ColorScheme.Amber)));
         colorMenu.DropDownItems.Add(CreateMenuItem("&White on Black", onClick: (_, _) => SetColorScheme(ColorScheme.WhiteOnBlack)));
         viewMenu.DropDownItems.Add(colorMenu);
+        viewMenu.DropDownItems.Add(new ToolStripSeparator());
+        _uppercaseMenuItem = CreateMenuItem("&Uppercase Input", onClick: OnToggleUppercase);
+        _uppercaseMenuItem.Checked = _uppercaseInput;
+        viewMenu.DropDownItems.Add(_uppercaseMenuItem);
         menu.Items.Add(viewMenu);
 
         var toolsMenu = CreateMenuItem("&Tools");
@@ -165,6 +173,7 @@ public class MainForm : Form
 
         _uiContext ??= SynchronizationContext.Current;
         var session = _sessionManager.CreateSession(dialog.Settings, _uiContext);
+        session.UppercaseInput = _uppercaseInput;
 
         try
         {
@@ -241,6 +250,14 @@ public class MainForm : Form
         await host.DisposeAsync();
         MessageBox.Show("MCP server stopped.", "AC5250",
             MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private void OnToggleUppercase(object? sender, EventArgs e)
+    {
+        _uppercaseInput = !_uppercaseInput;
+        if (_uppercaseMenuItem != null) _uppercaseMenuItem.Checked = _uppercaseInput;
+        foreach (var s in _sessionManager.Sessions)
+            s.UppercaseInput = _uppercaseInput;
     }
 
     private void OnMcpInfo(object? sender, EventArgs e)

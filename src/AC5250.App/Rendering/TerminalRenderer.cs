@@ -11,122 +11,106 @@ public static class TerminalRenderer
         Font font,
         int cellWidth,
         int cellHeight,
+        int offsetX,
+        int offsetY,
         ColorScheme colors,
         bool cursorVisible)
     {
         g.Clear(colors.Background);
 
-        using var normalBrush = new SolidBrush(colors.Normal);
-        using var hiBrush = new SolidBrush(colors.HighIntensity);
-        using var nonDisplayBrush = new SolidBrush(colors.NonDisplay);
-        using var reverseBrush = new SolidBrush(colors.Reverse);
-        using var underlinePen = new Pen(colors.Underline, 1);
-        using var colSepPen = new Pen(colors.ColumnSeparator, 1);
-        using var inputBgBrush = new SolidBrush(colors.InputFieldBackground);
-        using var attrBrush = new SolidBrush(colors.FieldAttributeMarker);
+        var textFlags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix
+            | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter;
 
-        var textFlags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
+        int rows = buffer.Rows, cols = buffer.Cols;
 
-        for (int row = 0; row < buffer.Rows; row++)
+        // Current display attribute, scanned left-to-right, top-to-bottom. A 5250
+        // attribute byte sets the characteristics for all following characters
+        // until the next attribute byte, so field text and free-form text are both
+        // colored correctly by this single pass.
+        var cur = new FieldAttribute.DisplayAttr(Field5250Color.Green, false, false, false, false, false);
+
+        using var inputBg = new SolidBrush(colors.InputFieldBackground);
+
+        for (int row = 0; row < rows; row++)
         {
-            for (int col = 0; col < buffer.Cols; col++)
+            for (int col = 0; col < cols; col++)
             {
-                int x = col * cellWidth;
-                int y = row * cellHeight;
+                int x = offsetX + col * cellWidth;
+                int y = offsetY + row * cellHeight;
+                var rect = new Rectangle(x, y, cellWidth, cellHeight);
 
-                // Check if this position is a field attribute marker
-                if (buffer.IsFieldAttributeAt(row, col))
+                byte a = buffer.GetAttributeByteAt(row, col);
+                if (a >= 0x20 && a <= 0x3F)
                 {
-                    continue; // attribute positions are blank
+                    // The attribute byte occupies a blank cell. A *field* attribute
+                    // (one that introduces a field) applies only to that field, so it
+                    // must NOT change the running character attribute. An *inline*
+                    // character attribute persists until the next attribute byte.
+                    int npos = row * cols + col + 1;
+                    bool isFieldMarker = npos < rows * cols && buffer.IsFieldStart(npos / cols, npos % cols);
+                    if (!isFieldMarker)
+                        cur = FieldAttribute.DecodeDisplay(a);
+                    continue;
                 }
 
-                // Get the field at this position for display attributes
                 var field = buffer.GetFieldAt(row, col);
-                bool isInputField = field != null && !field.Attribute.IsBypass;
-                bool isNonDisplay = field?.Attribute.IsNonDisplay == true;
-                bool isHighIntensity = field?.Attribute.IsHighIntensity == true;
-                bool isUnderline = field?.Attribute.IsUnderline == true;
-                bool isColumnSep = field?.Attribute.IsColumnSeparator == true;
-                bool isReverse = field?.Attribute.IsReverse == true;
+                bool isInput = field != null && !field.Attribute.IsBypass;
 
-                // Background for input fields
-                if (isInputField && !isNonDisplay)
+                // Field cells take the field's own attribute; free text takes the
+                // running character attribute.
+                FieldAttribute.DisplayAttr eff = field != null
+                    ? new FieldAttribute.DisplayAttr(field.Attribute.Color, field.Attribute.IsReverse,
+                        field.Attribute.IsUnderline, field.Attribute.IsNonDisplay,
+                        field.Attribute.IsColumnSeparator, field.Attribute.IsBlink)
+                    : cur;
+
+                Color fg = colors.ColorFor(eff.Color);
+
+                if (isInput)
+                    g.FillRectangle(inputBg, rect);
+
+                if (eff.Reverse && !eff.NonDisplay)
                 {
-                    g.FillRectangle(inputBgBrush, x, y, cellWidth, cellHeight);
+                    using var rb = new SolidBrush(fg);
+                    g.FillRectangle(rb, rect);
                 }
 
-                // Get character
-                byte ebcdic;
-                if (field != null)
+                if (!eff.NonDisplay)
                 {
-                    int idx = field.GetIndexForPosition(row, col, buffer.Cols);
-                    ebcdic = field.GetCharAt(idx);
-                }
-                else
-                {
-                    ebcdic = buffer.GetCharAt(row, col);
-                }
-
-                char ch = Ebcdic.ToAscii(ebcdic);
-
-                // Pick brush based on attributes
-                Brush textBrush;
-                if (isNonDisplay)
-                    textBrush = nonDisplayBrush;
-                else if (isReverse)
-                {
-                    g.FillRectangle(reverseBrush, x, y, cellWidth, cellHeight);
-                    textBrush = new SolidBrush(colors.Background);
-                }
-                else if (isHighIntensity)
-                    textBrush = hiBrush;
-                else
-                    textBrush = normalBrush;
-
-                // Draw character
-                if (ch > ' ')
-                {
-                    var rect = new Rectangle(x, y, cellWidth, cellHeight);
-                    TextRenderer.DrawText(g, ch.ToString(), font, rect,
-                        ((SolidBrush)textBrush).Color, Color.Transparent, textFlags);
+                    byte eb = field != null
+                        ? field.GetCharAt(field.GetIndexForPosition(row, col, cols))
+                        : buffer.GetCharAt(row, col);
+                    char ch = Ebcdic.ToAscii(eb);
+                    if (ch > ' ' && ch <= '~')
+                    {
+                        Color textColor = eff.Reverse ? colors.Background : fg;
+                        TextRenderer.DrawText(g, ch.ToString(), font, rect, textColor, Color.Transparent, textFlags);
+                    }
                 }
 
-                // Underline
-                if (isUnderline && !isNonDisplay)
+                if (eff.Underline)
                 {
-                    g.DrawLine(underlinePen, x, y + cellHeight - 1, x + cellWidth, y + cellHeight - 1);
+                    using var up = new Pen(eff.NonDisplay ? colors.InputUnderline : fg);
+                    g.DrawLine(up, x, y + cellHeight - 1, x + cellWidth - 1, y + cellHeight - 1);
                 }
 
-                // Column separator
-                if (isColumnSep && !isNonDisplay)
+                if (eff.ColumnSeparator && !eff.NonDisplay)
                 {
-                    g.DrawLine(colSepPen, x + cellWidth - 1, y, x + cellWidth - 1, y + cellHeight);
+                    using var cp = new Pen(colors.ColumnSeparator);
+                    g.DrawLine(cp, x, y, x, y + cellHeight - 1);
                 }
-
-                // Dispose reverse brush if we created one
-                if (isReverse && !isNonDisplay)
-                    textBrush.Dispose();
             }
         }
 
-        // Draw cursor
-        if (cursorVisible && buffer.CursorRow < buffer.Rows && buffer.CursorCol < buffer.Cols)
+        if (cursorVisible && buffer.CursorRow < rows && buffer.CursorCol < cols)
         {
-            int cx = buffer.CursorCol * cellWidth;
-            int cy = buffer.CursorRow * cellHeight;
-
-            using var cursorBrush = new SolidBrush(Color.FromArgb(180, colors.CursorColor));
-
+            int cx = offsetX + buffer.CursorCol * cellWidth;
+            int cy = offsetY + buffer.CursorRow * cellHeight;
+            using var cursorBrush = new SolidBrush(Color.FromArgb(200, colors.CursorColor));
             if (buffer.InsertMode)
-            {
-                // Half-block cursor for insert mode
                 g.FillRectangle(cursorBrush, cx, cy + cellHeight / 2, cellWidth, cellHeight / 2);
-            }
             else
-            {
-                // Underline cursor for normal mode
-                g.FillRectangle(cursorBrush, cx, cy + cellHeight - 2, cellWidth, 2);
-            }
+                g.FillRectangle(cursorBrush, cx, cy + cellHeight - 3, cellWidth, 3);
         }
     }
 
@@ -145,44 +129,35 @@ public static class TerminalRenderer
         using var bgBrush = new SolidBrush(colors.StatusBarBackground);
         g.FillRectangle(bgBrush, 0, y, width, height);
 
-        // Top border line
         using var borderPen = new Pen(Color.FromArgb(40, colors.StatusBarText));
         g.DrawLine(borderPen, 0, y, width, y);
 
         var flags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.VerticalCenter;
         int pad = 8;
 
-        // Left side: connection info
         TextRenderer.DrawText(g, hostInfo, font, new Rectangle(pad, y, width / 3, height),
             colors.StatusBarText, Color.Transparent, flags);
 
-        // Center: status indicators as individual badges
         int cx = width / 2 - 60;
         int badgeY = y + (height - 14) / 2;
         int badgeH = 14;
 
         if (buffer.InputInhibited)
-            cx = DrawStatusBadge(g, "X II", cx, badgeY, badgeH, font,
-                Color.FromArgb(180, 70, 70), Color.FromArgb(40, 180, 70, 70));
+            cx = DrawStatusBadge(g, "X II", cx, badgeY, badgeH, font, Color.FromArgb(200, 90, 80), Color.FromArgb(40, 200, 90, 80));
         if (buffer.InsertMode)
-            cx = DrawStatusBadge(g, "INS", cx, badgeY, badgeH, font,
-                Color.FromArgb(200, 180, 60), Color.FromArgb(40, 200, 180, 60));
+            cx = DrawStatusBadge(g, "INS", cx, badgeY, badgeH, font, Color.FromArgb(200, 180, 60), Color.FromArgb(40, 200, 180, 60));
         if (buffer.MessageWaiting)
-            cx = DrawStatusBadge(g, "MW", cx, badgeY, badgeH, font,
-                Color.FromArgb(72, 199, 142), Color.FromArgb(40, 72, 199, 142));
+            cx = DrawStatusBadge(g, "MW", cx, badgeY, badgeH, font, Color.FromArgb(72, 199, 142), Color.FromArgb(40, 72, 199, 142));
         if (buffer.SystemAvailable)
-            cx = DrawStatusBadge(g, "SA", cx, badgeY, badgeH, font,
-                Color.FromArgb(100, 160, 100), Color.FromArgb(25, 100, 160, 100));
+            cx = DrawStatusBadge(g, "SA", cx, badgeY, badgeH, font, Color.FromArgb(100, 160, 100), Color.FromArgb(25, 100, 160, 100));
 
-        // Right side: cursor position
         string pos = $"{buffer.CursorRow + 1:D2}:{buffer.CursorCol + 1:D3}";
         var dimColor = Color.FromArgb(140, colors.StatusBarText);
         TextRenderer.DrawText(g, pos, font, new Rectangle(width - 80 - pad, y, 80, height),
             dimColor, Color.Transparent, flags | TextFormatFlags.Right);
     }
 
-    private static int DrawStatusBadge(Graphics g, string text, int x, int y, int h, Font font,
-        Color fg, Color bg)
+    private static int DrawStatusBadge(Graphics g, string text, int x, int y, int h, Font font, Color fg, Color bg)
     {
         var size = TextRenderer.MeasureText(text, font);
         int w = size.Width + 6;
