@@ -146,9 +146,12 @@ public class TerminalSession : IDisposable
     {
         if (Screen.InputInhibited && aid != AidKey.Attn && aid != AidKey.SysReq)
         {
-            return; // keyboard locked
+            // Log which key was dropped (name only — no field data / no password).
+            OnDebugLog($"AID {aid} DROPPED (keyboard locked)");
+            return;
         }
 
+        OnDebugLog($"AID {aid} sent");
         Screen.InputInhibited = true;
         Screen.NotifyScreenChanged();
 
