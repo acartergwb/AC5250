@@ -32,6 +32,9 @@ public class MainForm : Form
     private bool _uppercaseInput = true;
     private ToolStripMenuItem? _uppercaseMenuItem;
 
+    private readonly AppSettings _settings = AppSettingsStore.Load();
+    private ToolStripMenuItem? _mcpStartupMenuItem;
+
     public MainForm(McpStartupOptions? mcpStartup = null)
     {
         _mcpStartup = mcpStartup;
@@ -142,6 +145,10 @@ public class MainForm : Form
         toolsMenu.DropDownItems.Add(CreateMenuItem("S&top MCP Server", onClick: OnStopMcp));
         toolsMenu.DropDownItems.Add(new ToolStripSeparator());
         toolsMenu.DropDownItems.Add(CreateMenuItem("MCP Connection &Info...", onClick: OnMcpInfo));
+        toolsMenu.DropDownItems.Add(new ToolStripSeparator());
+        _mcpStartupMenuItem = CreateMenuItem("Start MCP on &Startup", onClick: OnToggleMcpStartup);
+        _mcpStartupMenuItem.Checked = _settings.StartMcpOnStartup;
+        toolsMenu.DropDownItems.Add(_mcpStartupMenuItem);
         menu.Items.Add(toolsMenu);
 
         var helpMenu = CreateMenuItem("&Help");
@@ -210,27 +217,29 @@ public class MainForm : Form
         // use it to marshal host-driven parsing and MCP calls onto this thread.
         _uiContext = SynchronizationContext.Current;
 
-        if (_mcpStartup?.AutoStart == true)
-            _ = StartMcpAsync(_mcpStartup.Token);
+        // Start the MCP server automatically unless the user turned it off, so an MCP
+        // client (Claude) can connect without any manual step. --mcp forces it on too.
+        if (_mcpStartup?.AutoStart == true || _settings.StartMcpOnStartup)
+            _ = StartMcpAsync();
     }
 
     private async void OnStartMcp(object? sender, EventArgs e)
     {
         if (_mcpHost != null) { OnMcpInfo(sender, e); return; }
 
-        if (await StartMcpAsync(null) && _mcpHost != null)
+        if (await StartMcpAsync() && _mcpHost != null)
         {
             using var dlg = new McpInfoDialog(_mcpHost);
             dlg.ShowDialog(this);
         }
     }
 
-    private async Task<bool> StartMcpAsync(string? token)
+    private async Task<bool> StartMcpAsync()
     {
         _uiContext ??= SynchronizationContext.Current;
         try
         {
-            var host = new McpHost(_sessionManager, this, _uiContext!, EffectivePort, token);
+            var host = new McpHost(_sessionManager, this, _uiContext!, EffectivePort);
             await host.StartAsync();
             _mcpHost = host;
             return true;
@@ -265,6 +274,17 @@ public class MainForm : Form
         if (_uppercaseMenuItem != null) _uppercaseMenuItem.Checked = _uppercaseInput;
         foreach (var s in _sessionManager.Sessions)
             s.UppercaseInput = _uppercaseInput;
+    }
+
+    private void OnToggleMcpStartup(object? sender, EventArgs e)
+    {
+        _settings.StartMcpOnStartup = !_settings.StartMcpOnStartup;
+        if (_mcpStartupMenuItem != null) _mcpStartupMenuItem.Checked = _settings.StartMcpOnStartup;
+        AppSettingsStore.Save(_settings);
+
+        // Convenience: enabling it starts the server now if it isn't already running.
+        if (_settings.StartMcpOnStartup && _mcpHost == null)
+            _ = StartMcpAsync();
     }
 
     private void OnMcpInfo(object? sender, EventArgs e)

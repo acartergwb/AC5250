@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using AC5250.Mcp;
 using AC5250.Session;
 using Microsoft.AspNetCore.Builder;
@@ -14,24 +13,23 @@ namespace AC5250.Hosting;
 /// Hosts the MCP server over loopback HTTP inside the WinForms process, so an MCP
 /// client (Claude) drives the very same sessions the user sees in the window.
 ///
-/// Security: bound to 127.0.0.1 only, and every request to the MCP endpoint must
-/// carry a per-launch bearer token. The token is generated in-process and never
-/// persisted. The server is started manually by the user (Tools menu), never
-/// automatically.
+/// Security: bound to 127.0.0.1 and additionally rejects any request whose remote
+/// address is not loopback (defense in depth). The server exists only while the app
+/// is running and is reachable only from this machine, so no auth token is used.
+/// Note: any process running as the current user can therefore reach it — the same
+/// trust boundary as the user's own desktop session.
 /// </summary>
 internal sealed class McpHost : IAsyncDisposable
 {
     public int Port { get; }
-    public string Token { get; }
     public string Url => $"http://127.0.0.1:{Port}/mcp";
 
     private readonly EmulatorController _controller;
     private WebApplication? _app;
 
-    public McpHost(SessionManager sessions, Control uiControl, SynchronizationContext uiContext, int port, string? token = null)
+    public McpHost(SessionManager sessions, Control uiControl, SynchronizationContext uiContext, int port)
     {
         Port = port;
-        Token = string.IsNullOrWhiteSpace(token) ? GenerateToken() : token!;
 
         var marshal = new ControlThreadMarshal(uiControl);
         _controller = new EmulatorController(
@@ -54,20 +52,15 @@ internal sealed class McpHost : IAsyncDisposable
 
         var app = builder.Build();
 
-        // Loopback bind + bearer-token guard on the MCP endpoint.
-        string expected = "Bearer " + Token;
+        // Defense in depth: even though we bind to 127.0.0.1, reject anything whose
+        // remote address isn't loopback so the endpoint can never serve a non-local peer.
         app.Use(async (ctx, next) =>
         {
-            if (ctx.Request.Path.StartsWithSegments("/mcp"))
+            var ip = ctx.Connection.RemoteIpAddress;
+            if (ip is null || !System.Net.IPAddress.IsLoopback(ip))
             {
-                var provided = ctx.Request.Headers.Authorization.ToString();
-                if (!CryptographicOperations.FixedTimeEquals(
-                        System.Text.Encoding.UTF8.GetBytes(provided),
-                        System.Text.Encoding.UTF8.GetBytes(expected)))
-                {
-                    ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                    return;
-                }
+                ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
+                return;
             }
             await next();
         });
@@ -80,14 +73,7 @@ internal sealed class McpHost : IAsyncDisposable
 
     /// <summary>Ready-to-paste command to register this server with Claude Code.</summary>
     public string ClaudeAddCommand =>
-        $"claude mcp add --transport http ac5250 {Url} --header \"Authorization: Bearer {Token}\"";
-
-    private static string GenerateToken()
-    {
-        Span<byte> bytes = stackalloc byte[24];
-        RandomNumberGenerator.Fill(bytes);
-        return Convert.ToHexString(bytes).ToLowerInvariant();
-    }
+        $"claude mcp add --transport http ac5250 {Url}";
 
     public async ValueTask DisposeAsync()
     {
