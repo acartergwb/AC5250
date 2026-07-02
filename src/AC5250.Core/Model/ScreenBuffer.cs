@@ -127,6 +127,10 @@ public class ScreenBuffer
 
     public void WriteCharacter(byte ebcdic)
     {
+        // A null (0x00) marks an empty character position in 5250. Store it as an
+        // EBCDIC blank so it neither renders as a control glyph nor ends up embedded
+        // in transmitted field data (an embedded null makes a value an invalid name).
+        if (ebcdic == 0x00) ebcdic = 0x40;
         int pos = _bufferRow * Cols + _bufferCol;
         if (pos >= 0 && pos < _characters.Length)
         {

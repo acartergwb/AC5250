@@ -64,9 +64,9 @@ public class ScreenField
 
     public byte[] GetData()
     {
-        // Return a copy, trimming trailing spaces
+        // Return a copy, trimming trailing blanks and nulls (both mean "empty").
         int end = Length;
-        while (end > 0 && _data[end - 1] == 0x40)
+        while (end > 0 && (_data[end - 1] == 0x40 || _data[end - 1] == 0x00))
             end--;
 
         var result = new byte[end];
