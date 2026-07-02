@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace AC5250.Session;
 
 public class ConnectionSettings
@@ -14,6 +16,7 @@ public class ConnectionSettings
 
     public ScreenSize ScreenSize { get; set; } = ScreenSize.Normal;
 
+    [JsonIgnore]
     public string DisplayName =>
         !string.IsNullOrWhiteSpace(SessionName) ? SessionName
         : string.IsNullOrEmpty(DeviceName) ? $"{HostName}:{Port}"

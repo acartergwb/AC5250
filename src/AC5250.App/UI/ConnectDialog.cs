@@ -10,8 +10,14 @@ public class ConnectDialog : Form
     private CheckBox _sslCheck = null!;
     private TextBox _deviceBox = null!;
     private ComboBox _sizeBox = null!;
+    private ComboBox _savedBox = null!;
+    private Button _saveButton = null!;
+    private Button _deleteButton = null!;
     private Button _okButton = null!;
     private Button _cancelButton = null!;
+
+    private List<ConnectionSettings> _saved = new();
+    private bool _loadingSaved;
 
     public ConnectionSettings Settings { get; private set; } = new();
 
@@ -64,6 +70,27 @@ public class ConnectDialog : Form
         });
 
         int y = 82;
+
+        // Saved connections
+        AddLabel("Saved", labelLeft, y);
+        _savedBox = new ComboBox
+        {
+            Location = new Point(controlLeft, y),
+            Size = new Size(130, 28),
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            BackColor = DarkTheme.Background,
+            ForeColor = DarkTheme.TextPrimary,
+            FlatStyle = FlatStyle.Flat,
+            Font = DarkTheme.UIFont,
+        };
+        _savedBox.SelectedIndexChanged += OnSavedSelected;
+        Controls.Add(_savedBox);
+
+        _saveButton = MakeSmallButton("Save", controlLeft + 136, y - 1, 60);
+        _saveButton.Click += OnSaveClick;
+        _deleteButton = MakeSmallButton("Delete", controlLeft + 200, y - 1, 64);
+        _deleteButton.Click += OnDeleteClick;
+        y += rowHeight;
 
         // Session Name
         AddLabel("Session Name", labelLeft, y);
@@ -176,9 +203,91 @@ public class ConnectDialog : Form
         // bar/borders, so this math is exact regardless of the OS chrome.
         ClientSize = new Size(contentRight + labelLeft, buttonY + 32 + 20);
 
+        LoadSaved();
+
         AcceptButton = _okButton;
         CancelButton = _cancelButton;
     }
+
+    private Button MakeSmallButton(string text, int x, int y, int w)
+    {
+        var b = new Button
+        {
+            Text = text,
+            Location = new Point(x, y),
+            Size = new Size(w, 28),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = DarkTheme.SurfaceLighter,
+            ForeColor = DarkTheme.TextPrimary,
+            Font = DarkTheme.UIFont,
+        };
+        b.FlatAppearance.BorderColor = DarkTheme.Border;
+        Controls.Add(b);
+        return b;
+    }
+
+    private void LoadSaved()
+    {
+        _loadingSaved = true;
+        _saved = ConnectionStore.Load();
+        _savedBox.Items.Clear();
+        _savedBox.Items.Add("(new connection)");
+        foreach (var c in _saved) _savedBox.Items.Add(c.DisplayName);
+        _savedBox.SelectedIndex = 0;
+        _deleteButton.Enabled = false;
+        _loadingSaved = false;
+    }
+
+    private void OnSavedSelected(object? sender, EventArgs e)
+    {
+        if (_loadingSaved) return;
+        int idx = _savedBox.SelectedIndex - 1; // 0 == "(new connection)"
+        _deleteButton.Enabled = idx >= 0;
+        if (idx >= 0 && idx < _saved.Count) FillFrom(_saved[idx]);
+    }
+
+    private void OnSaveClick(object? sender, EventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(_hostBox.Text))
+        {
+            _hostBox.BackColor = Color.FromArgb(60, 30, 30);
+            _hostBox.Focus();
+            return;
+        }
+        var settings = BuildSettings();
+        _saved = ConnectionStore.Upsert(settings);
+        LoadSaved();
+        int i = _savedBox.Items.IndexOf(settings.DisplayName);
+        if (i > 0) _savedBox.SelectedIndex = i;
+    }
+
+    private void OnDeleteClick(object? sender, EventArgs e)
+    {
+        int idx = _savedBox.SelectedIndex - 1;
+        if (idx < 0 || idx >= _saved.Count) return;
+        _saved = ConnectionStore.Remove(_saved[idx].DisplayName);
+        LoadSaved();
+    }
+
+    private void FillFrom(ConnectionSettings c)
+    {
+        _sessionNameBox.Text = c.SessionName;
+        _hostBox.Text = c.HostName;
+        _portBox.Value = Math.Clamp(c.Port, (int)_portBox.Minimum, (int)_portBox.Maximum);
+        _sslCheck.Checked = c.UseSsl;
+        _deviceBox.Text = c.DeviceName;
+        _sizeBox.SelectedIndex = c.ScreenSize == ScreenSize.Wide ? 1 : 0;
+    }
+
+    private ConnectionSettings BuildSettings() => new()
+    {
+        HostName = _hostBox.Text.Trim(),
+        Port = (int)_portBox.Value,
+        UseSsl = _sslCheck.Checked,
+        DeviceName = _deviceBox.Text.Trim(),
+        SessionName = _sessionNameBox.Text.Trim(),
+        ScreenSize = _sizeBox.SelectedIndex == 1 ? ScreenSize.Wide : ScreenSize.Normal,
+    };
 
     private Label AddLabel(string text, int x, int y)
     {
@@ -219,14 +328,6 @@ public class ConnectDialog : Form
             return;
         }
 
-        Settings = new ConnectionSettings
-        {
-            HostName = _hostBox.Text.Trim(),
-            Port = (int)_portBox.Value,
-            UseSsl = _sslCheck.Checked,
-            DeviceName = _deviceBox.Text.Trim(),
-            SessionName = _sessionNameBox.Text.Trim(),
-            ScreenSize = _sizeBox.SelectedIndex == 1 ? ScreenSize.Wide : ScreenSize.Normal,
-        };
+        Settings = BuildSettings();
     }
 }
