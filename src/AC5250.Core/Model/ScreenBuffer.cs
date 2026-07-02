@@ -185,6 +185,12 @@ public class ScreenBuffer
         // Field data starts at the next position.
         AdvanceBufferPosition();
 
+        // A redraw that re-defines a field at the same position REPLACES it — 5250
+        // has one field per position. Without this, screens that repaint without a
+        // Clear (e.g. after closing the F21 command window) pile up duplicate field
+        // objects, leaving a stale input box on screen that never clears.
+        Fields.RemoveAll(f => f.Row == _bufferRow && f.Col == _bufferCol);
+
         var field = new ScreenField(_bufferRow, _bufferCol, length, attr, Cols);
         Fields.Add(field);
 
