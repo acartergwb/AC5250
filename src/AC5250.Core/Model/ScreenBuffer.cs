@@ -4,12 +4,12 @@ namespace AC5250.Model;
 
 public class ScreenBuffer
 {
-    public int Rows { get; }
-    public int Cols { get; }
+    public int Rows { get; private set; }
+    public int Cols { get; private set; }
 
     // Character buffer (EBCDIC)
-    private readonly byte[] _characters;
-    private readonly byte[] _attributes;
+    private byte[] _characters;
+    private byte[] _attributes;
 
     // Saved screen state
     private byte[]? _savedCharacters;
@@ -66,6 +66,25 @@ public class ScreenBuffer
         }
         Version++;
         ScreenChanged?.Invoke();
+    }
+
+    /// <summary>
+    /// Clear the screen, resizing the buffer first if the requested size differs.
+    /// The host switches between 24x80 (Clear Unit) and 27x132 (Clear Unit Alternate)
+    /// within a session; without following that, host addressing lands at the wrong
+    /// positions and the previous screen bleeds through.
+    /// </summary>
+    public void ClearToSize(int rows, int cols)
+    {
+        if (rows != Rows || cols != Cols)
+        {
+            Rows = rows;
+            Cols = cols;
+            _characters = new byte[rows * cols];
+            _attributes = new byte[rows * cols];
+            _savedCharacters = null; // saved screen is for the old size
+        }
+        Clear();
     }
 
     public void Clear()

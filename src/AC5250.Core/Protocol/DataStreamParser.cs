@@ -114,8 +114,12 @@ public class DataStreamParser
                 switch (cmd)
                 {
                     case TelnetConstants.CMD_CLEAR_UNIT:
+                        _screen.ClearToSize(24, 80);   // switch/keep 24x80
+                        offset++;
+                        break;
+
                     case TelnetConstants.CMD_CLEAR_UNIT_ALT:
-                        _screen.Clear();
+                        _screen.ClearToSize(27, 132);  // switch/keep 27x132 (wide)
                         offset++;
                         break;
 
@@ -171,6 +175,7 @@ public class DataStreamParser
         if ((cc1 & 0x40) != 0) _screen.ClearFormatTable();
 
         // Parse orders and data until ESC (new command) or end of record
+        bool firstOrder = true;
         while (offset < record.Length)
         {
             byte b = record[offset];
@@ -182,7 +187,19 @@ public class DataStreamParser
             switch (b)
             {
                 case TelnetConstants.ORDER_SOH:
-                    offset = ParseStartOfHeader(record, offset + 1);
+                    // SOH (a screen-format header) is only valid as the first order of
+                    // a write. A 0x01 encountered mid-stream is data, NOT a header —
+                    // treating it as SOH let a stray length byte (e.g. 0x80) skip ~128
+                    // bytes, eating content and letting the previous screen bleed through.
+                    if (firstOrder)
+                    {
+                        offset = ParseStartOfHeader(record, offset + 1);
+                    }
+                    else
+                    {
+                        _screen.WriteCharacter(b);
+                        offset++;
+                    }
                     break;
 
                 case TelnetConstants.ORDER_SBA:
@@ -255,6 +272,8 @@ public class DataStreamParser
                     offset++;
                     break;
             }
+
+            firstOrder = false;
         }
 
         return offset;

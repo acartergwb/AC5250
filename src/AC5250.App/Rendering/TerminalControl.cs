@@ -11,6 +11,8 @@ public class TerminalControl : UserControl
     private int _cellHeight;
     private int _offsetX;
     private int _offsetY;
+    private int _fitRows = -1;
+    private int _fitCols = -1;
     private bool _cursorVisible = true;
     private readonly System.Windows.Forms.Timer _cursorTimer;
     private ColorScheme _colors = ColorScheme.Color5250;
@@ -82,9 +84,17 @@ public class TerminalControl : UserControl
     private void OnScreenChanged()
     {
         if (InvokeRequired)
-            BeginInvoke(Invalidate);
+            BeginInvoke(HandleScreenChanged);
         else
-            Invalidate();
+            HandleScreenChanged();
+    }
+
+    private void HandleScreenChanged()
+    {
+        // If the host switched screen size (24x80 <-> 27x132), refit the font/grid.
+        if (_buffer != null && (_buffer.Rows != _fitRows || _buffer.Cols != _fitCols))
+            RecalculateFont();
+        Invalidate();
     }
 
     private void InvalidateCursor()
@@ -157,6 +167,8 @@ public class TerminalControl : UserControl
         _cellHeight = bestH;
         _offsetX = Math.Max(0, (Width - bestW * _buffer.Cols) / 2);
         _offsetY = Math.Max(0, (availableHeight - bestH * _buffer.Rows) / 2);
+        _fitRows = _buffer.Rows;
+        _fitCols = _buffer.Cols;
     }
 
     protected override void OnPaint(PaintEventArgs e)
