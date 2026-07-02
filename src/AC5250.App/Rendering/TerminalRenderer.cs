@@ -42,14 +42,34 @@ public static class TerminalRenderer
                 byte a = buffer.GetAttributeByteAt(row, col);
                 if (a >= 0x20 && a <= 0x3F)
                 {
-                    // The attribute byte occupies a blank cell. A *field* attribute
-                    // (one that introduces a field) applies only to that field, so it
-                    // must NOT change the running character attribute. An *inline*
-                    // character attribute persists until the next attribute byte.
+                    // The attribute byte occupies a blank cell that is itself displayed
+                    // with the attribute it defines. So a reverse-video attribute (e.g.
+                    // the red-reverse cells that frame a pop-up window) must paint this
+                    // cell as a colored block, and an underline attribute must underline
+                    // it — otherwise the window's left/right border columns (which are
+                    // bare attribute cells, not filled blanks) render as invisible gaps.
+                    var here = FieldAttribute.DecodeDisplay(a);
+                    if (!here.NonDisplay)
+                    {
+                        if (here.Reverse)
+                        {
+                            using var rb = new SolidBrush(colors.ColorFor(here.Color));
+                            g.FillRectangle(rb, rect);
+                        }
+                        else if (here.Underline)
+                        {
+                            using var up = new Pen(colors.ColorFor(here.Color));
+                            g.DrawLine(up, x, y + cellHeight - 1, x + cellWidth - 1, y + cellHeight - 1);
+                        }
+                    }
+
+                    // A *field* attribute (one that introduces a field) applies only to
+                    // that field, so it must NOT change the running character attribute.
+                    // An *inline* character attribute persists until the next attribute byte.
                     int npos = row * cols + col + 1;
                     bool isFieldMarker = npos < rows * cols && buffer.IsFieldStart(npos / cols, npos % cols);
                     if (!isFieldMarker)
-                        cur = FieldAttribute.DecodeDisplay(a);
+                        cur = here;
                     continue;
                 }
 
