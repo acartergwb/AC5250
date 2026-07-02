@@ -131,6 +131,21 @@ public class ScreenBuffer
         _insertCursorCol = _bufferCol;
     }
 
+    // A field's leading attribute byte sits one cell before its first data cell.
+    // In 5250, writing anything over that attribute byte DESTROYS the field. This is
+    // how a stale input box goes away when the host repaints over it without clearing
+    // the format table — e.g. after F12 closes the F21 command line, the host paints
+    // "Selection:" over the old command field's attribute cell, so the box must drop.
+    private void InvalidateFieldWithAttrAt(int pos)
+    {
+        if (Fields.Count == 0) return;
+        for (int i = Fields.Count - 1; i >= 0; i--)
+        {
+            var f = Fields[i];
+            if (f.Row * Cols + f.Col - 1 == pos) Fields.RemoveAt(i);
+        }
+    }
+
     public void WriteAttribute(byte displayAttr)
     {
         // A 5250 display attribute (0x20-0x3F) occupies a screen position as a
@@ -138,6 +153,7 @@ public class ScreenBuffer
         int pos = _bufferRow * Cols + _bufferCol;
         if (pos >= 0 && pos < _characters.Length)
         {
+            InvalidateFieldWithAttrAt(pos);
             _characters[pos] = 0x40; // display as space
             _attributes[pos] = displayAttr;
         }
@@ -153,6 +169,7 @@ public class ScreenBuffer
         int pos = _bufferRow * Cols + _bufferCol;
         if (pos >= 0 && pos < _characters.Length)
         {
+            InvalidateFieldWithAttrAt(pos);
             _characters[pos] = ebcdic;
             _attributes[pos] = 0; // this position now holds a character, not an attribute
         }
@@ -165,6 +182,7 @@ public class ScreenBuffer
         int pos = _bufferRow * Cols + _bufferCol;
         if (pos >= 0 && pos < _characters.Length)
         {
+            InvalidateFieldWithAttrAt(pos);
             _characters[pos] = rawByte;
         }
         AdvanceBufferPosition();
@@ -213,6 +231,7 @@ public class ScreenBuffer
             // Wrap around
             while (currentPos < total)
             {
+                InvalidateFieldWithAttrAt(currentPos);
                 _characters[currentPos] = ch;
                 _attributes[currentPos] = 0;
                 currentPos++;
@@ -222,6 +241,7 @@ public class ScreenBuffer
 
         while (currentPos < targetPos && currentPos < total)
         {
+            InvalidateFieldWithAttrAt(currentPos);
             _characters[currentPos] = ch;
             _attributes[currentPos] = 0;
             currentPos++;
