@@ -115,6 +115,17 @@ public static class DataStreamWriter
         return data.ToArray();
     }
 
+    /// <summary>
+    /// Acknowledge a Cancel Invite (opcode 0x0A). Per the 5250 protocol (see tn5250's
+    /// tn5250_session_cancel_invite), when the host cancels an invited read the terminal
+    /// must send an empty record back with the Cancel-Invite opcode. Without this ack the
+    /// host blocks waiting for it — the keyboard stays locked and the screen freezes
+    /// (e.g. after closing the F21 command line, leaving the input box stuck on screen).
+    /// </summary>
+    public static byte[] BuildCancelInviteResponse()
+        => new byte[] { 0x00, 0x0A, 0x12, 0xA0, 0x00, 0x00, 0x04, 0x00, 0x00,
+                        TelnetConstants.OPCODE_CANCEL_INVITE };
+
     private static void FillRecordLength(List<byte> data)
     {
         data[0] = (byte)(data.Count >> 8);

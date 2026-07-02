@@ -93,8 +93,13 @@ public class DataStreamParser
                 break;
 
             case TelnetConstants.OPCODE_CANCEL_INVITE:
+                // The host cancelled the invited read; it now BLOCKS until the terminal
+                // acknowledges. Send the ack or the session freezes (keyboard locked, the
+                // previous screen — e.g. the F21 command window — stuck on display).
                 _screen.InputInhibited = true;
                 _screen.NotifyScreenChanged();
+                if (SendResponse != null)
+                    await SendResponse.Invoke(DataStreamWriter.BuildCancelInviteResponse());
                 break;
         }
     }
