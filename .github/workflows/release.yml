@@ -1,0 +1,51 @@
+name: Release
+
+# Build a self-contained production exe and attach it to a GitHub Release
+# whenever a version tag (v*) is pushed. Cut a release with:
+#     git tag v1.0.0 && git push origin v1.0.0
+# The published AC5250-<tag>.exe is a single, self-contained Windows x64 binary
+# (bundles the .NET 10 runtime) — download it from the Releases page and run.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write           # needed to create the release and upload the asset
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish self-contained single-file exe
+        shell: pwsh
+        run: >
+          dotnet publish src/AC5250.App/AC5250.App.csproj
+          -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -o publish
+
+      - name: Name the artifact with the tag
+        shell: pwsh
+        run: Copy-Item publish/AC5250.exe "AC5250-${{ github.ref_name }}.exe"
+
+      - name: Create GitHub Release with the exe
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "${{ github.ref_name }}"
+          "AC5250-${{ github.ref_name }}.exe"
+          --repo "${{ github.repository }}"
+          --title "AC5250 ${{ github.ref_name }}"
+          --generate-notes
