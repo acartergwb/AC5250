@@ -63,6 +63,10 @@ public class DataStreamParser
 
             case TelnetConstants.OPCODE_SAVE_SCREEN:
                 _screen.SaveScreen();
+                // The host requires the screen image back; otherwise it waits and the
+                // keyboard stays locked ("X SYSTEM"). Common on windowed/wide flows.
+                if (SendResponse != null)
+                    await SendResponse.Invoke(DataStreamWriter.BuildSaveScreenResponse(_screen));
                 break;
 
             case TelnetConstants.OPCODE_RESTORE_SCREEN:

@@ -50,6 +50,40 @@ public static class DataStreamWriter
         return data.ToArray();
     }
 
+    /// <summary>
+    /// Build the response to a Save Screen request (opcode 0x04): a data stream that
+    /// recreates the current screen, which the host stores and replays on a later
+    /// Restore Screen. Per RFC 1205 the client MUST send the screen image back —
+    /// without it the host waits forever and the keyboard stays locked ("X SYSTEM").
+    /// </summary>
+    public static byte[] BuildSaveScreenResponse(ScreenBuffer screen)
+    {
+        var data = new List<byte>(screen.Rows * screen.Cols + 32)
+        {
+            // Header, opcode 0x04 (save screen)
+            0x00, 0x00, 0x12, 0xA0, 0x00, 0x00, 0x04, 0x00, 0x00, 0x04,
+            // Write-To-Display (ESC + WTD) + control chars, then home the buffer
+            0x04, TelnetConstants.CMD_WRITE_TO_DISPLAY, 0x00, 0x00,
+            TelnetConstants.ORDER_SBA, 0x01, 0x01,
+        };
+
+        // Emit the whole buffer: the attribute byte at field/attribute positions,
+        // the character elsewhere. Replaying this recreates the visible screen.
+        for (int r = 0; r < screen.Rows; r++)
+        {
+            for (int c = 0; c < screen.Cols; c++)
+            {
+                byte b = screen.IsFieldAttributeAt(r, c)
+                    ? screen.GetAttributeByteAt(r, c)
+                    : screen.GetCharAt(r, c);
+                data.Add(b == 0x00 ? (byte)0x40 : b);
+            }
+        }
+
+        FillRecordLength(data);
+        return data.ToArray();
+    }
+
     private static void FillRecordLength(List<byte> data)
     {
         data[0] = (byte)(data.Count >> 8);
