@@ -158,17 +158,16 @@ public class ScreenBuffer
             _attributes[attrPos] = (raw >= 0x20 && raw <= 0x3F) ? raw : (byte)0x20;
         }
 
-        // Field data starts at the next position
+        // Field data starts at the next position.
         AdvanceBufferPosition();
 
         var field = new ScreenField(_bufferRow, _bufferCol, length, attr, Cols);
         Fields.Add(field);
 
-        // Advance buffer past the field
-        for (int i = 0; i < length; i++)
-        {
-            AdvanceBufferPosition();
-        }
+        // Leave the buffer at the field's first data position. In 5250 the field's
+        // initial content follows the SF order inline and fills the field; if we
+        // advanced past the field here, that content would land AFTER the field
+        // (overwriting the next constant) and the field would render empty.
     }
 
     public void RepeatToAddress(int row, int col, byte ch)
@@ -360,6 +359,16 @@ public class ScreenBuffer
             CursorCol = _savedCursorCol;
             NotifyScreenChanged();
         }
+    }
+
+    // Copy host-written content out of the character buffer into each field's data
+    // (the inverse of SyncFieldToBuffer). Called after parsing a display record so
+    // that host-prefilled field values (e.g. *SAME on CHGUSRPRF) both display and
+    // are sent back correctly. Uses SetData so the modified-data-tag is left clear.
+    public void SyncBufferToFields()
+    {
+        foreach (var field in Fields)
+            field.SetData(_characters, field.Row * Cols + field.Col, field.Length);
     }
 
     // Sync field data into the character buffer (for display)

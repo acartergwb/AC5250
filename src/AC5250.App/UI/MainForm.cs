@@ -352,6 +352,22 @@ public class MainForm : Form
             else
                 UpdateStatus(session, msg);
         };
+
+        if (!string.IsNullOrEmpty(_mcpStartup?.LogFile))
+            session.DebugLogged += AppendLog;
+    }
+
+    private readonly object _logLock = new();
+
+    // Append host-side trace lines to the --logfile. Lines for records we SEND are
+    // skipped so the operator's keystrokes (including passwords) are never written.
+    private void AppendLog(string line)
+    {
+        var path = _mcpStartup?.LogFile;
+        if (string.IsNullOrEmpty(path)) return;
+        if (line.Contains("SEND record")) return;
+        try { lock (_logLock) System.IO.File.AppendAllText(path, line + Environment.NewLine); }
+        catch { /* diagnostics only */ }
     }
 
     private void OnSessionRemoved(TerminalSession session)

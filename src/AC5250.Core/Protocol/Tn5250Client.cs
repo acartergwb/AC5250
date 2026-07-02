@@ -77,7 +77,7 @@ public class Tn5250Client : IDisposable
                     return;
                 }
 
-                DebugLog?.Invoke($"RECV [{bytesRead}]: {FormatHex(buffer, 0, Math.Min(bytesRead, 64))}");
+                DebugLog?.Invoke($"RECV [{bytesRead}]: {FormatHex(buffer, 0, bytesRead)}");
                 for (int k = 0; k < bytesRead; k++) _pending.Add(buffer[k]);
 
                 await ProcessPendingAsync(ct);
@@ -120,7 +120,7 @@ public class Tn5250Client : IDisposable
                 case TelnetConstants.EOR:
                     if (_record.Count > 0)
                     {
-                        DebugLog?.Invoke($"5250 record [{_record.Count}]: {FormatHex(_record, 0, Math.Min(_record.Count, 48))}");
+                        DebugLog?.Invoke($"5250 record [{_record.Count}]: {FormatHex(_record, 0, _record.Count)}");
                         DataReceived?.Invoke(_record.ToArray());
                         _record.Clear();
                     }

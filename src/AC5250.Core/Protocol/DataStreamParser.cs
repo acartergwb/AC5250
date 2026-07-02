@@ -138,6 +138,9 @@ public class DataStreamParser
             }
         }
 
+        // Capture host-written field content (e.g. prefilled *SAME values) into the
+        // field objects so it displays and is transmitted back correctly.
+        _screen.SyncBufferToFields();
         _screen.NotifyScreenChanged();
     }
 
@@ -187,9 +190,19 @@ public class DataStreamParser
                     break;
 
                 case TelnetConstants.ORDER_IC:
-                    _screen.SetCursorAddress(_screen.CursorRow, _screen.CursorCol);
-                    _screen.InsertCursorHere();
-                    offset++;
+                    // Insert Cursor: 0x13 followed by row + col (1-based). Positions
+                    // the cursor. Previously consumed only 1 byte, so the row/col were
+                    // misparsed as data + an attribute byte (a reverse attribute that
+                    // then bled across the screen as a green block).
+                    if (offset + 2 < record.Length)
+                    {
+                        _screen.SetCursorAddress(record[offset + 1] - 1, record[offset + 2] - 1);
+                        offset += 3;
+                    }
+                    else
+                    {
+                        offset = record.Length;
+                    }
                     break;
 
                 case TelnetConstants.ORDER_MC:
@@ -237,13 +250,15 @@ public class DataStreamParser
 
     private int ParseStartOfHeader(byte[] record, int offset)
     {
-        // SOH: length byte, then flag bytes
+        // SOH order: 0x01, a length byte, then `length` header data bytes. `offset`
+        // points at the length byte, so skip the length byte itself PLUS the data.
+        // (The previous `offset + length` was one byte short, leaving parsing on the
+        // last SOH data byte — which, when it was 0x10, was read as a Transparent
+        // Data order and swallowed the following orders, shifting the whole screen.)
         if (offset >= record.Length) return record.Length;
 
         int length = record[offset];
-        // SOH data controls input fields behavior, error line, etc.
-        // Skip past the SOH data for now
-        return offset + length;
+        return offset + length + 1;
     }
 
     private int ParseSetBufferAddress(byte[] record, int offset)

@@ -427,9 +427,14 @@ public class TerminalSession : IDisposable
         StatusMessage?.Invoke($"Error: {ex.Message}");
     }
 
+    /// <summary>Raised for each debug/trace line (connection, negotiation, records).</summary>
+    public event Action<string>? DebugLogged;
+
     private void OnDebugLog(string msg)
     {
-        lock (_debugLog) _debugLog.Add($"[{DateTime.Now:HH:mm:ss.fff}] {msg}");
+        string line = $"[{DateTime.Now:HH:mm:ss.fff}] {msg}";
+        lock (_debugLog) _debugLog.Add(line);
+        DebugLogged?.Invoke(line);
     }
 
     /// <summary>Snapshot of the connection/negotiation debug trace (thread-safe copy).</summary>

@@ -14,11 +14,16 @@ public sealed class McpStartupOptions
     public int? Port { get; init; }
     public string? Token { get; init; }
 
+    /// <summary>Optional path to append the host 5250-record trace to (diagnostics).
+    /// Never records what the operator types (sent records are excluded).</summary>
+    public string? LogFile { get; init; }
+
     public static McpStartupOptions Parse(string[] args)
     {
         bool auto = false;
         int? port = null;
         string? token = null;
+        string? logFile = null;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -33,9 +38,12 @@ public sealed class McpStartupOptions
                 case "--mcp-token":
                     if (i + 1 < args.Length) token = args[++i];
                     break;
+                case "--logfile":
+                    if (i + 1 < args.Length) logFile = args[++i];
+                    break;
             }
         }
 
-        return new McpStartupOptions { AutoStart = auto, Port = port, Token = token };
+        return new McpStartupOptions { AutoStart = auto, Port = port, Token = token, LogFile = logFile };
     }
 }
