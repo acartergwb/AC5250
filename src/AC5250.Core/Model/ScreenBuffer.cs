@@ -135,6 +135,7 @@ public class ScreenBuffer
         if (pos >= 0 && pos < _characters.Length)
         {
             _characters[pos] = ebcdic;
+            _attributes[pos] = 0; // this position now holds a character, not an attribute
         }
         AdvanceBufferPosition();
     }
@@ -188,6 +189,7 @@ public class ScreenBuffer
             while (currentPos < total)
             {
                 _characters[currentPos] = ch;
+                _attributes[currentPos] = 0;
                 currentPos++;
             }
             currentPos = 0;
@@ -196,6 +198,7 @@ public class ScreenBuffer
         while (currentPos < targetPos && currentPos < total)
         {
             _characters[currentPos] = ch;
+            _attributes[currentPos] = 0;
             currentPos++;
         }
 
