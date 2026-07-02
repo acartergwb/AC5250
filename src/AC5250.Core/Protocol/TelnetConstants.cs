@@ -43,9 +43,10 @@ public static class TelnetConstants
     public const byte OPCODE_SAVE_SCREEN = 0x04;
     public const byte OPCODE_RESTORE_SCREEN = 0x05;
     public const byte OPCODE_READ_IMMEDIATE = 0x06;
+    public const byte OPCODE_READ_SCREEN = 0x08;
     public const byte OPCODE_CANCEL_INVITE = 0x0A;
-    public const byte OPCODE_TURN_ON_MSG_LIGHT = 0x07;
-    public const byte OPCODE_TURN_OFF_MSG_LIGHT = 0x08;
+    public const byte OPCODE_TURN_ON_MSG_LIGHT = 0x0B;
+    public const byte OPCODE_TURN_OFF_MSG_LIGHT = 0x0C;
 
     // 5250 data stream orders (within WTD)
     public const byte ORDER_SOH = 0x01;   // Start of Header

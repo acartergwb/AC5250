@@ -73,6 +73,14 @@ public class DataStreamParser
                 _screen.RestoreScreen();
                 break;
 
+            case TelnetConstants.OPCODE_READ_SCREEN:
+                // Host wants the current screen contents back (e.g. F21 command line
+                // does Save Screen then Read Screen). Without a reply it waits and the
+                // keyboard stays locked ("X SYSTEM").
+                if (SendResponse != null)
+                    await SendResponse.Invoke(DataStreamWriter.BuildSaveScreenResponse(_screen));
+                break;
+
             case TelnetConstants.OPCODE_TURN_ON_MSG_LIGHT:
                 _screen.MessageWaiting = true;
                 _screen.NotifyScreenChanged();
