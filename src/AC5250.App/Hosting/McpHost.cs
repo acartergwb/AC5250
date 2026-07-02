@@ -35,7 +35,10 @@ internal sealed class McpHost : IAsyncDisposable
         _controller = new EmulatorController(
             sessions,
             marshal,
-            settings => sessions.CreateSession(settings, uiContext));
+            settings => sessions.CreateSession(settings, uiContext),
+            // Sign-on credentials come from the Windows Credential Manager on this
+            // machine; the password is read here only to fill the field, never returned.
+            settings => AC5250.Security.CredentialStore.Get(settings.HostName));
     }
 
     public async Task StartAsync()

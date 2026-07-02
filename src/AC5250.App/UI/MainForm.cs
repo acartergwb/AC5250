@@ -124,6 +124,9 @@ public class MainForm : Form
         sessionMenu.DropDownItems.Add(CreateMenuItem("&New Session...", Keys.Control | Keys.T, OnConnect));
         sessionMenu.DropDownItems.Add(CreateMenuItem("&Close Session", Keys.Control | Keys.W, OnCloseSession));
         sessionMenu.DropDownItems.Add(new ToolStripSeparator());
+        sessionMenu.DropDownItems.Add(CreateMenuItem("Sign &On (saved credentials)", onClick: OnSignOn));
+        sessionMenu.DropDownItems.Add(CreateMenuItem("&Manage Saved Credentials...", onClick: OnManageCredentials));
+        sessionMenu.DropDownItems.Add(new ToolStripSeparator());
         sessionMenu.DropDownItems.Add(CreateMenuItem("&Debug Log...", Keys.Control | Keys.Shift | Keys.D, OnShowDebugLog));
         menu.Items.Add(sessionMenu);
 
@@ -274,6 +277,58 @@ public class MainForm : Form
         if (_uppercaseMenuItem != null) _uppercaseMenuItem.Checked = _uppercaseInput;
         foreach (var s in _sessionManager.Sessions)
             s.UppercaseInput = _uppercaseInput;
+    }
+
+    private void OnManageCredentials(object? sender, EventArgs e)
+    {
+        using var dlg = new CredentialsDialog();
+        dlg.ShowDialog(this);
+    }
+
+    // Manual counterpart to the MCP `signon` tool: fill the sign-on screen from the
+    // saved credentials for the active session's host and submit. The password is read
+    // from Windows Credential Manager and only ever written into the (hidden) field.
+    private void OnSignOn(object? sender, EventArgs e)
+    {
+        var s = _sessionManager.ActiveSession;
+        if (s == null)
+        {
+            MessageBox.Show("No active session.", "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        var creds = AC5250.Security.CredentialStore.Get(s.Settings.HostName);
+        if (creds is null)
+        {
+            MessageBox.Show(
+                $"No saved credentials for host '{s.Settings.HostName}'.\nAdd them via Session > Manage Saved Credentials.",
+                "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var fields = s.Screen.Fields;
+        int userIdx = -1, pwIdx = -1;
+        for (int i = 0; i < fields.Count; i++)
+        {
+            var a = fields[i].Attribute;
+            if (a.IsBypass) continue;
+            if (a.IsNonDisplay) { if (pwIdx < 0) pwIdx = i; }
+            else if (userIdx < 0) userIdx = i;
+        }
+        if (userIdx < 0 || pwIdx < 0)
+        {
+            MessageBox.Show("This screen isn't a sign-on prompt (no user + hidden password field found).",
+                "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        if (!s.SetFieldValue(userIdx, creds.Value.User, true) || !s.SetFieldValue(pwIdx, creds.Value.Password, true))
+        {
+            MessageBox.Show("Could not fill the sign-on fields (keyboard inhibited?).",
+                "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (AC5250.Mcp.KeyNames.TryParse("Enter", out var enter))
+            s.HandleKeyAction(enter);
     }
 
     private void OnToggleMcpStartup(object? sender, EventArgs e)
