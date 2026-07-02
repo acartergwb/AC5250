@@ -49,7 +49,19 @@ public static class TerminalRenderer
                     // it — otherwise the window's left/right border columns (which are
                     // bare attribute cells, not filled blanks) render as invisible gaps.
                     var here = FieldAttribute.DecodeDisplay(a);
-                    if (!here.NonDisplay)
+
+                    // A *field* attribute (one that introduces a field) applies only to
+                    // that field, so it must NOT change the running character attribute.
+                    // An *inline* character attribute persists until the next attribute byte.
+                    int npos = row * cols + col + 1;
+                    bool isFieldMarker = npos < rows * cols && buffer.IsFieldStart(npos / cols, npos % cols);
+
+                    // Paint the attribute cell only for INLINE attributes — a window's
+                    // red-reverse border column shows as a colored block, etc. A field's
+                    // leading attribute belongs to the field's own cells, not this gap
+                    // cell; painting it would add a stray underline/fill one column left
+                    // of every input field (making fields look shifted a space right).
+                    if (!isFieldMarker && !here.NonDisplay)
                     {
                         if (here.Reverse)
                         {
@@ -63,11 +75,6 @@ public static class TerminalRenderer
                         }
                     }
 
-                    // A *field* attribute (one that introduces a field) applies only to
-                    // that field, so it must NOT change the running character attribute.
-                    // An *inline* character attribute persists until the next attribute byte.
-                    int npos = row * cols + col + 1;
-                    bool isFieldMarker = npos < rows * cols && buffer.IsFieldStart(npos / cols, npos % cols);
                     if (!isFieldMarker)
                         cur = here;
                     continue;
