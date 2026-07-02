@@ -57,6 +57,7 @@ public static class TelnetConstants
     public const byte ORDER_WEA = 0x12;   // Write Extended Attribute
     public const byte ORDER_IC = 0x13;    // Insert Cursor
     public const byte ORDER_MC = 0x14;    // Move Cursor
+    public const byte ORDER_WDSF = 0x15;  // Write to Display Structured Field
     public const byte ORDER_SF = 0x1D;    // Start of Field
 
     // 5250 Write commands

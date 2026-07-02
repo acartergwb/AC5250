@@ -257,6 +257,23 @@ public class DataStreamParser
                     offset += 3;
                     break;
 
+                case TelnetConstants.ORDER_WDSF:
+                    // Write to Display Structured Field (windows/GUI). 0x15 is followed
+                    // by a structured field: a 2-byte length (which includes itself)
+                    // then its data. Skip the whole SF by that length. Parsing into it
+                    // was misreading interior bytes (e.g. 01 80) as a 128-byte SOH,
+                    // which corrupted the screen and truncated menu titles.
+                    if (offset + 2 < record.Length)
+                    {
+                        int sfLen = (record[offset + 1] << 8) | record[offset + 2];
+                        offset += 1 + Math.Max(sfLen, 3); // 0x15 + structured field
+                    }
+                    else
+                    {
+                        offset = record.Length;
+                    }
+                    break;
+
                 default:
                     if (b >= 0x20 && b <= 0x3F)
                     {
