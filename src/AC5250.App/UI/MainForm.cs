@@ -82,6 +82,7 @@ public class MainForm : Form
     {
         var welcome = new WelcomePanel();
         welcome.ConnectClicked += (_, _) => OnConnect(this, EventArgs.Empty);
+        welcome.LaunchProfile += (_, settings) => ConnectWith(settings);
         welcome.Dock = DockStyle.Fill;
         _terminalPanel.Controls.Add(welcome);
     }
@@ -163,16 +164,22 @@ public class MainForm : Form
         return item;
     }
 
-    private async void OnConnect(object? sender, EventArgs e)
+    private void OnConnect(object? sender, EventArgs e)
     {
         using var dialog = new ConnectDialog();
         if (dialog.ShowDialog(this) != DialogResult.OK)
             return;
 
+        ConnectWith(dialog.Settings);
+    }
+
+    /// <summary>Open and connect a session directly from settings (quick-launch), no dialog.</summary>
+    private async void ConnectWith(ConnectionSettings settings)
+    {
         HideWelcome();
 
         _uiContext ??= SynchronizationContext.Current;
-        var session = _sessionManager.CreateSession(dialog.Settings, _uiContext);
+        var session = _sessionManager.CreateSession(settings, _uiContext);
         session.UppercaseInput = _uppercaseInput;
 
         try
@@ -514,8 +521,14 @@ public class MainForm : Form
 internal class WelcomePanel : Control
 {
     public event EventHandler? ConnectClicked;
-    private Rectangle _buttonRect;
-    private bool _buttonHover;
+    public event EventHandler<ConnectionSettings>? LaunchProfile;
+
+    private readonly List<ConnectionSettings> _profiles;
+    private readonly List<Rectangle> _profileRects = new();
+    private Rectangle _actionRect;   // "Connect" button (no profiles) OR "+ New connection" link
+    private int _hover = -1;         // 0..n-1 = profile card, n = action, -1 = none
+
+    private const int CardW = 380, CardH = 58, CardGap = 12;
 
     public WelcomePanel()
     {
@@ -526,6 +539,7 @@ internal class WelcomePanel : Control
             ControlStyles.ResizeRedraw,
             true);
         BackColor = DarkTheme.Background;
+        _profiles = ConnectionStore.Load();
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -535,58 +549,132 @@ internal class WelcomePanel : Control
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
         g.Clear(DarkTheme.Background);
+        _profileRects.Clear();
 
         int centerX = Width / 2;
-        int y = Height / 2 - 80;
+        bool hasProfiles = _profiles.Count > 0;
+
+        using var titleFont = new Font("Consolas", 28f, FontStyle.Bold);
+        using var subFont = new Font("Segoe UI", 11f);
+        using var headingFont = new Font("Segoe UI", 9f, FontStyle.Bold);
+        using var nameFont = new Font("Segoe UI", 11f, FontStyle.Bold);
+        using var detailFont = new Font("Segoe UI", 8.5f);
+        using var btnFont = new Font("Segoe UI", 10f, FontStyle.Bold);
+        using var hintFont = new Font("Segoe UI", 8.5f);
+
+        var titleSize = TextRenderer.MeasureText(g, "AC5250", titleFont);
+        var subSize = TextRenderer.MeasureText(g, "x", subFont);
+
+        // Compute total content height so the block is vertically centered.
+        int contentH = titleSize.Height + 8 + subSize.Height + 30;
+        if (hasProfiles)
+            contentH += 22 /*heading*/ + _profiles.Count * (CardH + CardGap) + 30 /*new link*/;
+        else
+            contentH += 40 /*connect btn*/ + 22 /*hint*/;
+
+        int y = Math.Max(24, (Height - contentH) / 2);
 
         // Title
-        using var titleFont = new Font("Consolas", 28f, FontStyle.Bold);
-        var titleSize = TextRenderer.MeasureText(g, "AC5250", titleFont);
         TextRenderer.DrawText(g, "AC5250", titleFont,
             new Point(centerX - titleSize.Width / 2, y), DarkTheme.Accent);
         y += titleSize.Height + 8;
 
         // Subtitle
-        using var subFont = new Font("Segoe UI", 11f);
         var sub = "Aidan's Custom TN5250 Terminal Emulator";
-        var subSize = TextRenderer.MeasureText(g, sub, subFont);
+        var subMeasured = TextRenderer.MeasureText(g, sub, subFont);
         TextRenderer.DrawText(g, sub, subFont,
-            new Point(centerX - subSize.Width / 2, y), DarkTheme.TextSecondary);
-        y += subSize.Height + 32;
+            new Point(centerX - subMeasured.Width / 2, y), DarkTheme.TextSecondary);
+        y += subMeasured.Height + 30;
 
-        // Connect button
-        int btnW = 180, btnH = 40;
-        _buttonRect = new Rectangle(centerX - btnW / 2, y, btnW, btnH);
+        if (hasProfiles)
+        {
+            // "QUICK LAUNCH" heading, left-aligned to the card column
+            int cardX = centerX - CardW / 2;
+            TextRenderer.DrawText(g, "QUICK LAUNCH", headingFont,
+                new Point(cardX + 2, y), DarkTheme.TextMuted);
+            y += 22;
 
-        var btnColor = _buttonHover ? DarkTheme.AccentHover : DarkTheme.Accent;
-        using var btnBrush = new SolidBrush(_buttonHover ? Color.FromArgb(30, DarkTheme.Accent) : Color.Transparent);
-        using var btnPen = new Pen(btnColor, 1.5f);
+            for (int i = 0; i < _profiles.Count; i++)
+            {
+                var rect = new Rectangle(cardX, y, CardW, CardH);
+                _profileRects.Add(rect);
+                bool hot = _hover == i;
 
-        FillRoundedRect(g, btnBrush, _buttonRect, 8);
-        DrawRoundedRect(g, btnPen, _buttonRect, 8);
+                using var fill = new SolidBrush(hot ? Color.FromArgb(40, DarkTheme.Accent) : DarkTheme.Surface);
+                using var pen = new Pen(hot ? DarkTheme.Accent : DarkTheme.Border, hot ? 1.5f : 1f);
+                FillRoundedRect(g, fill, rect, 8);
+                DrawRoundedRect(g, pen, rect, 8);
 
-        using var btnFont = new Font("Segoe UI", 10f, FontStyle.Bold);
-        TextRenderer.DrawText(g, "Connect", btnFont, _buttonRect, btnColor,
-            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                var p = _profiles[i];
+                TextRenderer.DrawText(g, p.DisplayName, nameFont,
+                    new Point(rect.X + 16, rect.Y + 9), hot ? DarkTheme.AccentHover : DarkTheme.TextPrimary,
+                    TextFormatFlags.Left);
 
-        y += btnH + 20;
+                string size = p.ScreenSize == ScreenSize.Wide ? "27x132" : "24x80";
+                string dev = string.IsNullOrEmpty(p.DeviceName) ? "auto device" : p.DeviceName;
+                string detail = $"{p.HostName}:{p.Port}   ·   {dev}   ·   {size}{(p.UseSsl ? "   ·   SSL" : "")}";
+                TextRenderer.DrawText(g, detail, detailFont,
+                    new Point(rect.X + 16, rect.Y + 32), DarkTheme.TextSecondary, TextFormatFlags.Left);
 
-        // Hint
-        using var hintFont = new Font("Segoe UI", 8.5f);
-        var hint = "Ctrl+N to connect  |  F1 for key mappings";
-        var hintSize = TextRenderer.MeasureText(g, hint, hintFont);
-        TextRenderer.DrawText(g, hint, hintFont,
-            new Point(centerX - hintSize.Width / 2, y), DarkTheme.TextMuted);
+                // ">" launch chevron on the right
+                TextRenderer.DrawText(g, "›", nameFont,
+                    new Rectangle(rect.Right - 34, rect.Y, 24, CardH),
+                    hot ? DarkTheme.AccentHover : DarkTheme.TextMuted,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+
+                y += CardH + CardGap;
+            }
+
+            // "+ New connection…" link
+            var linkText = "+  New connection…";
+            var linkSize = TextRenderer.MeasureText(g, linkText, detailFont);
+            _actionRect = new Rectangle(centerX - linkSize.Width / 2 - 8, y + 4, linkSize.Width + 16, linkSize.Height + 8);
+            bool linkHot = _hover == _profiles.Count;
+            TextRenderer.DrawText(g, linkText, detailFont, _actionRect,
+                linkHot ? DarkTheme.AccentHover : DarkTheme.TextMuted,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        }
+        else
+        {
+            // No saved profiles: single Connect button (original behavior)
+            int btnW = 180, btnH = 40;
+            _actionRect = new Rectangle(centerX - btnW / 2, y, btnW, btnH);
+            bool hot = _hover == 0;
+
+            var btnColor = hot ? DarkTheme.AccentHover : DarkTheme.Accent;
+            using var btnBrush = new SolidBrush(hot ? Color.FromArgb(30, DarkTheme.Accent) : Color.Transparent);
+            using var btnPen = new Pen(btnColor, 1.5f);
+            FillRoundedRect(g, btnBrush, _actionRect, 8);
+            DrawRoundedRect(g, btnPen, _actionRect, 8);
+            TextRenderer.DrawText(g, "Connect", btnFont, _actionRect, btnColor,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+
+            y += btnH + 22;
+
+            var hint = "Ctrl+N to connect  |  F1 for key mappings";
+            var hintSize = TextRenderer.MeasureText(g, hint, hintFont);
+            TextRenderer.DrawText(g, hint, hintFont,
+                new Point(centerX - hintSize.Width / 2, y), DarkTheme.TextMuted);
+        }
+    }
+
+    /// <summary>Hit-test index: 0..n-1 profile card, n = action (new link / connect btn), -1 none.</summary>
+    private int HitTest(Point pt)
+    {
+        for (int i = 0; i < _profileRects.Count; i++)
+            if (_profileRects[i].Contains(pt)) return i;
+        if (_actionRect.Contains(pt)) return _profiles.Count > 0 ? _profiles.Count : 0;
+        return -1;
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
-        bool hover = _buttonRect.Contains(e.Location);
-        if (hover != _buttonHover)
+        int hit = HitTest(e.Location);
+        if (hit != _hover)
         {
-            _buttonHover = hover;
-            Cursor = hover ? Cursors.Hand : Cursors.Default;
+            _hover = hit;
+            Cursor = hit >= 0 ? Cursors.Hand : Cursors.Default;
             Invalidate();
         }
     }
@@ -594,14 +682,19 @@ internal class WelcomePanel : Control
     protected override void OnMouseLeave(EventArgs e)
     {
         base.OnMouseLeave(e);
-        if (_buttonHover) { _buttonHover = false; Invalidate(); }
+        if (_hover != -1) { _hover = -1; Cursor = Cursors.Default; Invalidate(); }
     }
 
     protected override void OnMouseClick(MouseEventArgs e)
     {
         base.OnMouseClick(e);
-        if (_buttonRect.Contains(e.Location))
-            ConnectClicked?.Invoke(this, EventArgs.Empty);
+        int hit = HitTest(e.Location);
+        if (hit < 0) return;
+
+        if (_profiles.Count > 0 && hit < _profiles.Count)
+            LaunchProfile?.Invoke(this, _profiles[hit]);   // quick-launch a saved profile
+        else
+            ConnectClicked?.Invoke(this, EventArgs.Empty);  // "+ New connection" or "Connect"
     }
 
     private static void FillRoundedRect(Graphics g, Brush brush, Rectangle rect, int radius)
