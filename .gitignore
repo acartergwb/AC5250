@@ -5,3 +5,7 @@ obj/
 *.suo
 .vs/
 publish/
+
+# ace session data (auto-added; disable via .acerc auto_gitignore=false)
+.acedata
+.acerc
