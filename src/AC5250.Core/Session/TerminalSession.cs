@@ -409,6 +409,14 @@ public class TerminalSession : IDisposable
     {
         try
         {
+            // Parser-generated replies only (Save/Read Screen, Query) — never keystrokes,
+            // so this contains no typed password. Logged in full (distinct from the
+            // excluded "SEND record" keystroke path) to make the F21 Save/Read exchange
+            // visible in --logfile captures.
+            var sb = new System.Text.StringBuilder("RESP [").Append(data.Length).Append("]: ");
+            for (int i = 0; i < data.Length && i < 64; i++) sb.Append(data[i].ToString("X2")).Append(' ');
+            OnDebugLog(sb.ToString().TrimEnd());
+
             await _client.SendRecordAsync(data);
         }
         catch (Exception ex)

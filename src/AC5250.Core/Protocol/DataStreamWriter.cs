@@ -84,6 +84,37 @@ public static class DataStreamWriter
         return data.ToArray();
     }
 
+    /// <summary>
+    /// Build the response to Read Screen Immediate (opcode 0x08): the raw contents of
+    /// the display's regeneration buffer, with NO Write-To-Display/SBA framing. Unlike
+    /// Save Screen (0x04) — whose reply is a replayable command stream — a Read reply is
+    /// pure buffer data. Sending the 7-byte "ESC WTD 00 00 SBA 01 01" prefix here made
+    /// the host read the image 7 bytes late, so its next redraw was shifted 7 columns
+    /// right (header values wrapped off the right edge onto the next row).
+    /// </summary>
+    public static byte[] BuildReadScreenResponse(ScreenBuffer screen)
+    {
+        var data = new List<byte>(screen.Rows * screen.Cols + 16)
+        {
+            // Header, opcode 0x00 (response). No ESC/WTD/SBA — the buffer follows directly.
+            0x00, 0x00, 0x12, 0xA0, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+        };
+
+        for (int r = 0; r < screen.Rows; r++)
+        {
+            for (int c = 0; c < screen.Cols; c++)
+            {
+                byte b = screen.IsFieldAttributeAt(r, c)
+                    ? screen.GetAttributeByteAt(r, c)
+                    : screen.GetCharAt(r, c);
+                data.Add(b == 0x00 ? (byte)0x40 : b);
+            }
+        }
+
+        FillRecordLength(data);
+        return data.ToArray();
+    }
+
     private static void FillRecordLength(List<byte> data)
     {
         data[0] = (byte)(data.Count >> 8);

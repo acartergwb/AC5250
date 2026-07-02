@@ -76,9 +76,10 @@ public class DataStreamParser
             case TelnetConstants.OPCODE_READ_SCREEN:
                 // Host wants the current screen contents back (e.g. F21 command line
                 // does Save Screen then Read Screen). Without a reply it waits and the
-                // keyboard stays locked ("X SYSTEM").
+                // keyboard stays locked ("X SYSTEM"). This is a RAW buffer read, not a
+                // replayable WTD stream — see BuildReadScreenResponse.
                 if (SendResponse != null)
-                    await SendResponse.Invoke(DataStreamWriter.BuildSaveScreenResponse(_screen));
+                    await SendResponse.Invoke(DataStreamWriter.BuildReadScreenResponse(_screen));
                 break;
 
             case TelnetConstants.OPCODE_TURN_ON_MSG_LIGHT:
