@@ -32,6 +32,9 @@ public class MainForm : Form
     private bool _uppercaseInput = true;
     private ToolStripMenuItem? _uppercaseMenuItem;
 
+    private readonly AppSettings _settings = AppSettingsStore.Load();
+    private ToolStripMenuItem? _mcpStartupMenuItem;
+
     public MainForm(McpStartupOptions? mcpStartup = null)
     {
         _mcpStartup = mcpStartup;
@@ -121,6 +124,9 @@ public class MainForm : Form
         sessionMenu.DropDownItems.Add(CreateMenuItem("&New Session...", Keys.Control | Keys.T, OnConnect));
         sessionMenu.DropDownItems.Add(CreateMenuItem("&Close Session", Keys.Control | Keys.W, OnCloseSession));
         sessionMenu.DropDownItems.Add(new ToolStripSeparator());
+        sessionMenu.DropDownItems.Add(CreateMenuItem("Sign &On (saved credentials)", onClick: OnSignOn));
+        sessionMenu.DropDownItems.Add(CreateMenuItem("&Manage Saved Credentials...", onClick: OnManageCredentials));
+        sessionMenu.DropDownItems.Add(new ToolStripSeparator());
         sessionMenu.DropDownItems.Add(CreateMenuItem("&Debug Log...", Keys.Control | Keys.Shift | Keys.D, OnShowDebugLog));
         menu.Items.Add(sessionMenu);
 
@@ -142,6 +148,10 @@ public class MainForm : Form
         toolsMenu.DropDownItems.Add(CreateMenuItem("S&top MCP Server", onClick: OnStopMcp));
         toolsMenu.DropDownItems.Add(new ToolStripSeparator());
         toolsMenu.DropDownItems.Add(CreateMenuItem("MCP Connection &Info...", onClick: OnMcpInfo));
+        toolsMenu.DropDownItems.Add(new ToolStripSeparator());
+        _mcpStartupMenuItem = CreateMenuItem("Start MCP on &Startup", onClick: OnToggleMcpStartup);
+        _mcpStartupMenuItem.Checked = _settings.StartMcpOnStartup;
+        toolsMenu.DropDownItems.Add(_mcpStartupMenuItem);
         menu.Items.Add(toolsMenu);
 
         var helpMenu = CreateMenuItem("&Help");
@@ -210,27 +220,29 @@ public class MainForm : Form
         // use it to marshal host-driven parsing and MCP calls onto this thread.
         _uiContext = SynchronizationContext.Current;
 
-        if (_mcpStartup?.AutoStart == true)
-            _ = StartMcpAsync(_mcpStartup.Token);
+        // Start the MCP server automatically unless the user turned it off, so an MCP
+        // client (Claude) can connect without any manual step. --mcp forces it on too.
+        if (_mcpStartup?.AutoStart == true || _settings.StartMcpOnStartup)
+            _ = StartMcpAsync();
     }
 
     private async void OnStartMcp(object? sender, EventArgs e)
     {
         if (_mcpHost != null) { OnMcpInfo(sender, e); return; }
 
-        if (await StartMcpAsync(null) && _mcpHost != null)
+        if (await StartMcpAsync() && _mcpHost != null)
         {
             using var dlg = new McpInfoDialog(_mcpHost);
             dlg.ShowDialog(this);
         }
     }
 
-    private async Task<bool> StartMcpAsync(string? token)
+    private async Task<bool> StartMcpAsync()
     {
         _uiContext ??= SynchronizationContext.Current;
         try
         {
-            var host = new McpHost(_sessionManager, this, _uiContext!, EffectivePort, token);
+            var host = new McpHost(_sessionManager, this, _uiContext!, EffectivePort);
             await host.StartAsync();
             _mcpHost = host;
             return true;
@@ -265,6 +277,69 @@ public class MainForm : Form
         if (_uppercaseMenuItem != null) _uppercaseMenuItem.Checked = _uppercaseInput;
         foreach (var s in _sessionManager.Sessions)
             s.UppercaseInput = _uppercaseInput;
+    }
+
+    private void OnManageCredentials(object? sender, EventArgs e)
+    {
+        using var dlg = new CredentialsDialog();
+        dlg.ShowDialog(this);
+    }
+
+    // Manual counterpart to the MCP `signon` tool: fill the sign-on screen from the
+    // saved credentials for the active session's host and submit. The password is read
+    // from Windows Credential Manager and only ever written into the (hidden) field.
+    private void OnSignOn(object? sender, EventArgs e)
+    {
+        var s = _sessionManager.ActiveSession;
+        if (s == null)
+        {
+            MessageBox.Show("No active session.", "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        var creds = AC5250.Security.CredentialStore.Get(s.Settings.HostName);
+        if (creds is null)
+        {
+            MessageBox.Show(
+                $"No saved credentials for host '{s.Settings.HostName}'.\nAdd them via Session > Manage Saved Credentials.",
+                "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var fields = s.Screen.Fields;
+        int userIdx = -1, pwIdx = -1;
+        for (int i = 0; i < fields.Count; i++)
+        {
+            var a = fields[i].Attribute;
+            if (a.IsBypass) continue;
+            if (a.IsNonDisplay) { if (pwIdx < 0) pwIdx = i; }
+            else if (userIdx < 0) userIdx = i;
+        }
+        if (userIdx < 0 || pwIdx < 0)
+        {
+            MessageBox.Show("This screen isn't a sign-on prompt (no user + hidden password field found).",
+                "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        if (!s.SetFieldValue(userIdx, creds.Value.User, true) || !s.SetFieldValue(pwIdx, creds.Value.Password, true))
+        {
+            MessageBox.Show("Could not fill the sign-on fields (keyboard inhibited?).",
+                "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (AC5250.Mcp.KeyNames.TryParse("Enter", out var enter))
+            s.HandleKeyAction(enter);
+    }
+
+    private void OnToggleMcpStartup(object? sender, EventArgs e)
+    {
+        _settings.StartMcpOnStartup = !_settings.StartMcpOnStartup;
+        if (_mcpStartupMenuItem != null) _mcpStartupMenuItem.Checked = _settings.StartMcpOnStartup;
+        AppSettingsStore.Save(_settings);
+
+        // Convenience: enabling it starts the server now if it isn't already running.
+        if (_settings.StartMcpOnStartup && _mcpHost == null)
+            _ = StartMcpAsync();
     }
 
     private void OnMcpInfo(object? sender, EventArgs e)

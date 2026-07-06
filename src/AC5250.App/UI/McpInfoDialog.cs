@@ -3,8 +3,8 @@ using AC5250.Hosting;
 namespace AC5250.UI;
 
 /// <summary>
-/// Shows the running MCP server's loopback URL, its per-launch bearer token, and
-/// a ready-to-paste <c>claude mcp add</c> command.
+/// Shows the running MCP server's loopback URL and a ready-to-paste
+/// <c>claude mcp add</c> command. No token: the server is loopback-only.
 /// </summary>
 internal sealed class McpInfoDialog : Form
 {
@@ -40,7 +40,7 @@ internal sealed class McpInfoDialog : Form
 
         var lbl = new Label
         {
-            Text = "Register with Claude Code (the token is regenerated each launch):",
+            Text = "Register with Claude Code (loopback only — no token needed):",
             ForeColor = DarkTheme.TextSecondary,
             Font = DarkTheme.UIFont,
             AutoSize = true,
@@ -78,11 +78,11 @@ internal sealed class McpInfoDialog : Form
             catch { /* clipboard occasionally unavailable */ }
         };
 
-        var tokenLbl = new Label
+        var noteLbl = new Label
         {
-            Text = $"Bearer token: {host.Token}",
+            Text = "Reachable only from this machine while the app is running.",
             ForeColor = DarkTheme.TextMuted,
-            Font = DarkTheme.MonoFont,
+            Font = DarkTheme.UIFont,
             AutoSize = true,
             Location = new Point(22, 268),
         };
@@ -99,7 +99,7 @@ internal sealed class McpInfoDialog : Form
         };
         ok.FlatAppearance.BorderColor = DarkTheme.Border;
 
-        Controls.AddRange(new Control[] { title, status, lbl, box, copyBtn, tokenLbl, ok });
+        Controls.AddRange(new Control[] { title, status, lbl, box, copyBtn, noteLbl, ok });
         AcceptButton = ok;
     }
 }

@@ -65,6 +65,14 @@ public static class McpTools
         [Description("Session id to target; omit for the active session.")] string? sessionId = null)
         => controller.SetField(sessionId, fieldIndex, value, clearFirst);
 
+    [McpServerTool(Name = "signon")]
+    [Description("Sign on to the current session using the credentials the user saved on this machine (Windows Credential Manager) for the session's host. Fills the user and password fields locally and presses Enter. You do NOT provide the password — it is read from the OS vault and never exposed. Use this when the screen is an IBM i sign-on prompt. Omit sessionId for the active session.")]
+    public static Task<ScreenSnapshot> SignOn(
+        EmulatorController controller,
+        [Description("Session id to sign on; omit for the active session.")] string? sessionId = null,
+        CancellationToken ct = default)
+        => controller.SignOnAsync(sessionId, 0, ct);
+
     [McpServerTool(Name = "press_key")]
     [Description("Press a 5250 key. AID keys submit the screen to the host: Enter, F1-F24, Clear, Attn, SysReq, Help, Print, PageUp, PageDown. Navigation/editing keys act client-side: Tab, BackTab, Home, End, Up, Down, Left, Right, Backspace, Delete, Insert, FieldExit, Reset, EraseInput. For AID keys the tool waits for the host to repaint before returning. Omit sessionId for the active session.")]
     public static Task<ScreenSnapshot> PressKey(
