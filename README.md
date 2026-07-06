@@ -66,7 +66,7 @@ dotnet run --project src/AC5250.App
 
 ## MCP integration
 
-Eight tools are exposed by **both** hosts:
+Nine tools are exposed by **both** hosts:
 
 | Tool | What it does |
 |---|---|
