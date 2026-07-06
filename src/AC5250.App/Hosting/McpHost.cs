@@ -36,9 +36,10 @@ internal sealed class McpHost : IAsyncDisposable
             sessions,
             marshal,
             settings => sessions.CreateSession(settings, uiContext),
-            // Sign-on credentials come from the Windows Credential Manager on this
-            // machine; the password is read here only to fill the field, never returned.
-            settings => AC5250.Security.CredentialStore.Get(settings.HostName));
+            // Sign-on credentials: Windows Credential Manager on this machine, with
+            // environment variables as a fallback/override. The password is read only to
+            // fill the field, never returned.
+            AC5250.Security.CredentialSources.CreateDefault());
     }
 
     public async Task StartAsync()

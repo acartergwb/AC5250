@@ -66,20 +66,29 @@ dotnet run --project src/AC5250.App
 
 ## MCP integration
 
-Seven tools are exposed by **both** hosts:
+Nine tools are exposed by **both** hosts:
 
 | Tool | What it does |
 |---|---|
 | `list_sessions` | List open sessions (id, title, host, connected, active). |
-| `get_screen` | The screen as a text grid + cursor, keyboard/status flags, and the input-field list. |
+| `get_screen` | The screen as a text grid + cursor, keyboard/status flags, and the input-field list. An instant read — if `keyboardInhibited` is true the host is still working. |
 | `connect` | Open a new TN5250 session to a host and wait for the first screen. |
 | `disconnect` | Close a session. |
 | `send_text` | Type text at the cursor (client-side; does not submit). |
 | `set_field` | Set an input field's value by its index from `get_screen`. |
-| `press_key` | Press a 5250 key — AID keys (`Enter`, `F1`-`F24`, `Clear`, `Attn`, `SysReq`, `Help`, `Print`, `PageUp`, `PageDown`) submit to the host and wait for the repaint; navigation/edit keys (`Tab`, `Home`, arrows, `FieldExit`, `EraseInput`, `Reset`, …) act locally. |
+| `press_key` | Press a 5250 key — AID keys (`Enter`, `F1`-`F24`, `Clear`, `Attn`, `SysReq`, `Help`, `Print`, `PageUp`, `PageDown`) submit to the host and **block until it finishes and re-invites input** (the keyboard stays locked, "X SYSTEM", while it works), so you get the real response, not an intermediate paint; navigation/edit keys (`Tab`, `Home`, arrows, `FieldExit`, `EraseInput`, `Reset`, …) act locally. |
+| `wait_for_screen` | Block until the host finishes working and the screen is ready again — or until a given text appears — then return it. The primitive for "start a long host job, then wait for it." |
 | `signon` | Sign on to the current session using credentials the user saved on this machine (Windows Credential Manager) for the session's host. You never provide the password — it is read from the OS vault, typed into the hidden field locally, and never returned. |
 
-A typical loop: `get_screen` → `set_field`/`send_text` → `press_key Enter` → `get_screen`.
+A typical loop: `get_screen` → `set_field`/`send_text` → `press_key Enter` → `get_screen`. For an
+operation the host takes a while on, `press_key` already waits; `wait_for_screen` is there for the
+rest (unsolicited updates, or waiting for a specific screen to land).
+
+**Waiting / readiness.** Pressing an AID key locks the keyboard until the host replies, so the
+tools treat an inhibited keyboard as "the system is still working" and keep waiting through it
+(up to a 30 s ceiling, tunable via `timeoutMs`) rather than returning a half-painted screen. If a
+wait hits the ceiling, the returned screen still carries `keyboardInhibited=true` so the client
+knows to wait again.
 
 ### Mode 1 — in-process (drive the visible desktop app)
 
@@ -104,7 +113,33 @@ claude mcp add ac5250 -- dotnet /abs/path/src/AC5250.Headless/bin/Debug/net10.0/
 # or, against a self-contained/published build, point directly at ac5250-mcp.exe
 ```
 
-Same tools, no GUI. Best for pure automation.
+Same tools, no GUI — best for unattended automation: the MCP client spawns the process on
+demand, so there is no app to start first. `signon` works here too. Credentials come from a
+platform-appropriate source (see below), so this runs on Windows, Linux, or macOS.
+
+**Where `signon` reads credentials** (via a pluggable `ICredentialSource`):
+
+- **Windows** — the Windows Credential Manager (DPAPI, per-user), with environment variables as
+  a fallback/override. Manage vault entries from the desktop app's **Session → Manage Saved
+  Credentials** dialog or Windows' *Credential Manager* control panel.
+- **Linux / macOS** (and as an override anywhere) — environment variables the spawner injects.
+  No Credential Manager exists off-Windows, and nothing is written to a file. Set a host-specific
+  pair, or a host-agnostic default for the single-host case:
+
+  ```sh
+  # host-specific: HOST = the connect host, upper-cased, non-alphanumerics -> '_'
+  #   e.g. host "test400.gwb.local"  ->  AC5250_TEST400_GWB_LOCAL_USER / _PASSWORD
+  #        host "10.1.1.3"           ->  AC5250_10_1_1_3_USER          / _PASSWORD
+  claude mcp add ac5250 \
+    -e AC5250_TEST400_GWB_LOCAL_USER=myuser \
+    -e AC5250_TEST400_GWB_LOCAL_PASSWORD=... \
+    -- dotnet /abs/path/ac5250-mcp.dll
+  # or the host-agnostic default:  AC5250_USER / AC5250_PASSWORD
+  ```
+
+  Both the user and password must be present or the lookup yields nothing (it never returns half
+  a credential). The password is read on demand to fill the hidden field — never stored in the
+  process, never returned to the client.
 
 ---
 
@@ -122,10 +157,12 @@ so it is treated as sensitive:
   step (toggle under Tools → *Start MCP on Startup*).
 - **Hidden fields are masked.** Non-display (password) fields are never surfaced in
   `get_screen` text or field content — only their presence is reported.
-- **Credentials in the OS vault.** Saved sign-on credentials live in the Windows
-  Credential Manager (DPAPI-encrypted, per-user) — never in a file, the connection
-  JSON, or logs. The `signon` tool reads the password on this machine to fill the
-  hidden field; it is never a tool parameter and never returned to the client.
+- **Credentials never in a file.** Sign-on credentials come from a pluggable
+  `ICredentialSource`: the Windows Credential Manager (DPAPI-encrypted, per-user) on
+  Windows, or spawner-injected environment variables on Linux/macOS (see the headless
+  section) — never the connection JSON, a config file, or logs. The `signon` tool reads
+  the password only to fill the hidden field; it is never a tool parameter and never
+  returned to the client.
 - **Production caution.** Do **not** point `connect` at a production IBM i (or any
   PCI-scoped environment) without explicit authorization. Screen contents pass into
   the model's context.
