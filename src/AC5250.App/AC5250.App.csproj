@@ -7,6 +7,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>AC5250</RootNamespace>
     <AssemblyName>AC5250</AssemblyName>
+    <!-- Baseline for local builds; the release workflow overrides with -p:Version=<tag>. -->
+    <Version>2.0.1</Version>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\AC5250.Core\AC5250.Core.csproj" />
