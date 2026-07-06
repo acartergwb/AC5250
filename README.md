@@ -78,7 +78,7 @@ Nine tools are exposed by **both** hosts:
 | `set_field` | Set an input field's value by its index from `get_screen`. |
 | `press_key` | Press a 5250 key — AID keys (`Enter`, `F1`-`F24`, `Clear`, `Attn`, `SysReq`, `Help`, `Print`, `PageUp`, `PageDown`) submit to the host and **block until it finishes and re-invites input** (the keyboard stays locked, "X SYSTEM", while it works), so you get the real response, not an intermediate paint; navigation/edit keys (`Tab`, `Home`, arrows, `FieldExit`, `EraseInput`, `Reset`, …) act locally. |
 | `wait_for_screen` | Block until the host finishes working and the screen is ready again — or until a given text appears — then return it. The primitive for "start a long host job, then wait for it." |
-| `signon` | Sign on to the current session using credentials the user saved on this machine (Windows Credential Manager) for the session's host. You never provide the password — it is read from the OS vault, typed into the hidden field locally, and never returned. |
+| `signon` | Sign on to the current session using credentials the user saved on this machine (Windows Credential Manager) for the session's host. A host can have several logins under short labels; omit `credentialLabel` for the host's default (or its only login), or pass one to choose. You never provide the password — it is read from the OS vault, typed into the hidden field locally, and never returned. |
 
 A typical loop: `get_screen` → `set_field`/`send_text` → `press_key Enter` → `get_screen`. For an
 operation the host takes a while on, `press_key` already waits; `wait_for_screen` is there for the
@@ -104,7 +104,9 @@ Launch flags: `--mcp` (force-start even if the setting is off), `--mcp-port <n>`
 
 With this mode you watch Claude drive the real terminal window. To let Claude get past
 the IBM i sign-on, save credentials under **Session → Manage Saved Credentials** (stored
-in Windows Credential Manager, keyed by host) and Claude calls the `signon` tool.
+in Windows Credential Manager) and Claude calls the `signon` tool. A host can hold several
+logins under short **labels** (e.g. `ADMIN`, `TESTUSER`); mark one the default, and Claude
+picks a specific one by passing `credentialLabel`.
 
 ### Mode 2 — headless (stdio, no window)
 
@@ -127,9 +129,9 @@ platform-appropriate source (see below), so this runs on Windows, Linux, or macO
   pair, or a host-agnostic default for the single-host case:
 
   ```sh
-  # host-specific: HOST = the connect host, upper-cased, non-alphanumerics -> '_'
-  #   e.g. host "test400.gwb.local"  ->  AC5250_TEST400_GWB_LOCAL_USER / _PASSWORD
-  #        host "10.1.1.3"           ->  AC5250_10_1_1_3_USER          / _PASSWORD
+  # HOST / LABEL = upper-cased, non-alphanumerics -> '_'
+  #   host "test400.gwb.local", default login  ->  AC5250_TEST400_GWB_LOCAL_USER / _PASSWORD
+  #   host "10.1.1.3", label "ADMIN"           ->  AC5250_10_1_1_3_ADMIN_USER    / _PASSWORD
   claude mcp add ac5250 \
     -e AC5250_TEST400_GWB_LOCAL_USER=myuser \
     -e AC5250_TEST400_GWB_LOCAL_PASSWORD=... \
@@ -137,9 +139,10 @@ platform-appropriate source (see below), so this runs on Windows, Linux, or macO
   # or the host-agnostic default:  AC5250_USER / AC5250_PASSWORD
   ```
 
-  Both the user and password must be present or the lookup yields nothing (it never returns half
-  a credential). The password is read on demand to fill the hidden field — never stored in the
-  process, never returned to the client.
+  Lookup order: `signon`'s `credentialLabel` (`AC5250_<HOST>_<LABEL>_*`) → the host default
+  (`AC5250_<HOST>_*`) → the global default (`AC5250_*`). Both the user and password must be
+  present or the lookup yields nothing (it never returns half a credential). The password is read
+  on demand to fill the hidden field — never stored in the process, never returned to the client.
 
 ---
 

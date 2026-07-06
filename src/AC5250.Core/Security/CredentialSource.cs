@@ -11,8 +11,12 @@ namespace AC5250.Security;
 /// </summary>
 public interface ICredentialSource
 {
-    /// <summary>Credentials for <paramref name="host"/>, or null if none are available.</summary>
-    (string User, string Password)? Get(string host);
+    /// <summary>Credentials for <paramref name="host"/> under an optional <paramref name="label"/>
+    /// (null = the default credential for the host), or null if none are available.</summary>
+    (string User, string Password)? Get(string host, string? label = null);
+
+    /// <summary>The credential labels available for <paramref name="host"/> (may be empty).</summary>
+    IReadOnlyList<string> Labels(string host);
 }
 
 /// <summary>
@@ -21,7 +25,8 @@ public interface ICredentialSource
 [SupportedOSPlatform("windows")]
 public sealed class WindowsCredentialSource : ICredentialSource
 {
-    public (string User, string Password)? Get(string host) => CredentialStore.Get(host);
+    public (string User, string Password)? Get(string host, string? label = null) => CredentialStore.Get(host, label);
+    public IReadOnlyList<string> Labels(string host) => CredentialStore.Labels(host);
 }
 
 /// <summary>
@@ -38,17 +43,40 @@ public sealed class EnvironmentCredentialSource : ICredentialSource
 {
     public const string Prefix = "AC5250_";
 
-    public (string User, string Password)? Get(string host)
+    public (string User, string Password)? Get(string host, string? label = null)
     {
+        if (!string.IsNullOrWhiteSpace(label))
+        {
+            var (lu, lp) = VarNamesFor(host, label);
+            var byLabel = Pair(lu, lp);
+            if (byLabel != null) return byLabel;
+        }
         var (userVar, pwVar) = VarNamesFor(host);
         return Pair(userVar, pwVar) ?? Pair(Prefix + "USER", Prefix + "PASSWORD");
     }
 
-    /// <summary>The host-specific env-var names for <paramref name="host"/> (for help text).</summary>
-    public static (string UserVar, string PasswordVar) VarNamesFor(string host)
+    /// <summary>The env-var names for <paramref name="host"/> (and optional label), for help text.</summary>
+    public static (string UserVar, string PasswordVar) VarNamesFor(string host, string? label = null)
     {
         string key = Sanitize(host);
+        if (!string.IsNullOrWhiteSpace(label))
+            key += "_" + Sanitize(label);
         return ($"{Prefix}{key}_USER", $"{Prefix}{key}_PASSWORD");
+    }
+
+    public IReadOnlyList<string> Labels(string host)
+    {
+        string prefix = Prefix + Sanitize(host) + "_";   // AC5250_<HOST>_
+        var labels = new List<string>();
+        foreach (System.Collections.DictionaryEntry kv in Environment.GetEnvironmentVariables())
+        {
+            string name = (kv.Key?.ToString() ?? "").ToUpperInvariant();
+            if (!name.StartsWith(prefix, StringComparison.Ordinal)) continue;
+            string rem = name[prefix.Length..];
+            if (rem == "USER") labels.Add("default");   // matches CredentialStore.DefaultLabel
+            else if (rem.EndsWith("_USER", StringComparison.Ordinal)) labels.Add(rem[..^5].ToLowerInvariant());
+        }
+        return labels.Distinct().ToList();
     }
 
     private static (string, string)? Pair(string userVar, string pwVar)
@@ -84,15 +112,18 @@ public sealed class ChainedCredentialSource : ICredentialSource
 
     public ChainedCredentialSource(params ICredentialSource[] sources) => _sources = sources;
 
-    public (string User, string Password)? Get(string host)
+    public (string User, string Password)? Get(string host, string? label = null)
     {
         foreach (var s in _sources)
         {
-            var c = s.Get(host);
+            var c = s.Get(host, label);
             if (c is not null) return c;
         }
         return null;
     }
+
+    public IReadOnlyList<string> Labels(string host)
+        => _sources.SelectMany(s => s.Labels(host)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 }
 
 /// <summary>Factory for the platform-appropriate default credential source.</summary>
