@@ -17,16 +17,24 @@ public sealed class EmulatorController
     private readonly IThreadMarshal _marshal;
     private readonly Func<ConnectionSettings, TerminalSession> _createSession;
 
+    // Resolves saved sign-on credentials for a session, or null if none. Supplied by the
+    // host (the WinForms app reads them from Windows Credential Manager). Kept as a
+    // delegate so the password is never a tool parameter and never enters the MCP layer
+    // except transiently to fill the field locally.
+    private readonly Func<ConnectionSettings, (string User, string Password)?>? _credentials;
+
     private const int DefaultSettleMs = 5000;
 
     public EmulatorController(
         SessionManager sessions,
         IThreadMarshal marshal,
-        Func<ConnectionSettings, TerminalSession> createSession)
+        Func<ConnectionSettings, TerminalSession> createSession,
+        Func<ConnectionSettings, (string User, string Password)?>? credentials = null)
     {
         _sessions = sessions;
         _marshal = marshal;
         _createSession = createSession;
+        _credentials = credentials;
     }
 
     public IReadOnlyList<SessionSummary> ListSessions() =>
@@ -98,6 +106,57 @@ public sealed class EmulatorController
             await WaitForSettleAsync(s, baseline, timeoutMs <= 0 ? DefaultSettleMs : timeoutMs, ct);
 
         return Snapshot(s);
+    }
+
+    /// <summary>
+    /// Sign on to the current session using the saved credentials for its host. Fills the
+    /// user and password fields locally and presses Enter. The password is read from the
+    /// OS credential store on this machine and is never accepted as a parameter nor
+    /// returned — the resulting snapshot masks the (non-display) password field.
+    /// </summary>
+    public async Task<ScreenSnapshot> SignOnAsync(string? sessionId, int settleMs, CancellationToken ct)
+    {
+        var s = Resolve(sessionId);
+
+        if (_credentials is null)
+            throw new McpException("Credential sign-on is not available in this host.");
+        var creds = _credentials(s.Settings);
+        if (creds is null)
+            throw new McpException(
+                $"No saved credentials for host '{s.Settings.HostName}'. Add them in the emulator: Session > Manage Saved Credentials.");
+
+        var (userIdx, pwIdx) = _marshal.Invoke(() => FindSignOnFields(s));
+        if (userIdx < 0 || pwIdx < 0)
+            throw new McpException("The current screen is not a sign-on screen (no visible user field + hidden password field found).");
+
+        var (user, password) = creds.Value;
+        bool filled = _marshal.Invoke(() =>
+            s.SetFieldValue(userIdx, user, true) && s.SetFieldValue(pwIdx, password, true));
+        if (!filled)
+            throw new McpException("Could not fill the sign-on fields (keyboard inhibited?).");
+
+        if (!KeyNames.TryParse("Enter", out var enter))
+            throw new McpException("internal: Enter key unavailable.");
+        long baseline = _marshal.Invoke(() => s.Screen.Version);
+        _marshal.Invoke(() => s.HandleKeyAction(enter));
+        await WaitForSettleAsync(s, baseline, settleMs <= 0 ? DefaultSettleMs : settleMs, ct);
+        return Snapshot(s);
+    }
+
+    /// <summary>Locate the sign-on user field (first visible, non-protected input) and
+    /// password field (first non-display input) by index into the screen's field list.</summary>
+    private static (int userIdx, int pwIdx) FindSignOnFields(TerminalSession s)
+    {
+        var fields = s.Screen.Fields;
+        int userIdx = -1, pwIdx = -1;
+        for (int i = 0; i < fields.Count; i++)
+        {
+            var a = fields[i].Attribute;
+            if (a.IsBypass) continue;
+            if (a.IsNonDisplay) { if (pwIdx < 0) pwIdx = i; }
+            else if (userIdx < 0) userIdx = i;
+        }
+        return (userIdx, pwIdx);
     }
 
     // --- helpers ---

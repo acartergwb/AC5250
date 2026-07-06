@@ -1,10 +1,10 @@
 name: Release
 
-# Build a self-contained production exe and attach it to a GitHub Release
-# whenever a version tag (v*) is pushed. Cut a release with:
-#     git tag v1.0.0 && git push origin v1.0.0
-# The published AC5250-<tag>.exe is a single, self-contained Windows x64 binary
-# (bundles the .NET 10 runtime) — download it from the Releases page and run.
+# On a version tag (v*), build a Velopack installer + update packages and publish
+# them to a GitHub Release. Cut a release with:
+#     git tag v2.0.0 && git push origin v2.0.0
+# Users download Setup.exe ONCE; the app then auto-updates on launch from these
+# releases (see Program.cs UpdateOnLaunch + docs.velopack.io).
 
 on:
   push:
@@ -12,7 +12,7 @@ on:
       - 'v*'
 
 permissions:
-  contents: write           # needed to create the release and upload the asset
+  contents: write           # create the release and upload assets
 
 jobs:
   build:
@@ -26,26 +26,38 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Publish self-contained single-file exe
+      - name: Version from tag (strip leading v)
+        id: ver
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}" -replace '^v', ''
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # Self-contained, but NOT single-file: Velopack packages the published folder and
+      # computes delta updates from it.
+      - name: Publish
         shell: pwsh
         run: >
           dotnet publish src/AC5250.App/AC5250.App.csproj
-          -c Release -r win-x64 --self-contained true
-          -p:PublishSingleFile=true
-          -p:IncludeNativeLibrariesForSelfExtract=true
-          -o publish
+          -c Release -r win-x64 --self-contained true -o publish
 
-      - name: Name the artifact with the tag
-        shell: pwsh
-        run: Copy-Item publish/AC5250.exe "AC5250-${{ github.ref_name }}.exe"
+      - name: Install Velopack CLI
+        run: dotnet tool install -g vpk
 
-      - name: Create GitHub Release with the exe
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # Pull the previous release so vpk can build a small delta package. Harmless (and
+      # skipped) on the first Velopack release, which has no prior packages.
+      - name: Download previous release (for deltas)
+        continue-on-error: true
+        run: vpk download github --repoUrl https://github.com/${{ github.repository }} --token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pack
+        run: vpk pack -u AC5250 -v ${{ steps.ver.outputs.version }} -p publish -e AC5250.exe --packTitle "AC5250"
+
+      - name: Upload to GitHub Release
         run: >
-          gh release create "${{ github.ref_name }}"
-          "AC5250-${{ github.ref_name }}.exe"
-          --repo "${{ github.repository }}"
-          --title "AC5250 ${{ github.ref_name }}"
-          --generate-notes
+          vpk upload github
+          --repoUrl https://github.com/${{ github.repository }}
+          --publish
+          --releaseName "AC5250 ${{ github.ref_name }}"
+          --tag ${{ github.ref_name }}
+          --token ${{ secrets.GITHUB_TOKEN }}

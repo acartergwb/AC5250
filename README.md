@@ -9,6 +9,22 @@ screen and drive the keyboard.
 
 ---
 
+## Install & updates
+
+Download **`Setup.exe`** from the [latest release](https://github.com/acartergwb/AC5250/releases/latest)
+and run it **once**. It installs per-user to `%LocalAppData%\AC5250` and creates Start/Desktop
+shortcuts you can pin (taskbar/Start/desktop) — the pinned icon always launches the current
+version.
+
+After that it's self-updating: on each launch the app checks GitHub Releases and, if a newer
+version exists, downloads it (delta) and relaunches into it — no re-download, no re-pin. Powered
+by [Velopack](https://velopack.io/).
+
+Releases are produced by the `Release` workflow when a `v*` tag is pushed (`git tag v2.0.0 && git push origin v2.0.0`).
+(Installers are unsigned, so Windows SmartScreen may warn on first run — *More info → Run anyway*.)
+
+---
+
 ## Solution layout
 
 | Project | Target | Purpose |
@@ -61,24 +77,25 @@ Seven tools are exposed by **both** hosts:
 | `send_text` | Type text at the cursor (client-side; does not submit). |
 | `set_field` | Set an input field's value by its index from `get_screen`. |
 | `press_key` | Press a 5250 key — AID keys (`Enter`, `F1`-`F24`, `Clear`, `Attn`, `SysReq`, `Help`, `Print`, `PageUp`, `PageDown`) submit to the host and wait for the repaint; navigation/edit keys (`Tab`, `Home`, arrows, `FieldExit`, `EraseInput`, `Reset`, …) act locally. |
+| `signon` | Sign on to the current session using credentials the user saved on this machine (Windows Credential Manager) for the session's host. You never provide the password — it is read from the OS vault, typed into the hidden field locally, and never returned. |
 
 A typical loop: `get_screen` → `set_field`/`send_text` → `press_key Enter` → `get_screen`.
 
 ### Mode 1 — in-process (drive the visible desktop app)
 
-Launch the emulator, then **Tools → Start MCP Server** (or launch with `--mcp`).
-The server binds to `127.0.0.1:8250` and issues a per-launch bearer token. The
-**Tools → MCP Connection Info…** dialog shows a ready-to-paste command:
+The server **starts automatically at launch** (Tools → *Start MCP on Startup*, on by
+default) and binds to `127.0.0.1:8250`. Because it is loopback-only and lives only
+while the app is open, it uses **no auth token**. Register it once:
 
 ```sh
-claude mcp add --transport http ac5250 http://127.0.0.1:8250/mcp \
-  --header "Authorization: Bearer <token-from-dialog>"
+claude mcp add --transport http ac5250 http://127.0.0.1:8250/mcp
 ```
 
-Launch flags: `--mcp` (auto-start), `--mcp-port <n>`, `--mcp-token <t>` (automation
-only — CLI args are visible in the process list).
+Launch flags: `--mcp` (force-start even if the setting is off), `--mcp-port <n>`.
 
-With this mode you watch Claude drive the real terminal window.
+With this mode you watch Claude drive the real terminal window. To let Claude get past
+the IBM i sign-on, save credentials under **Session → Manage Saved Credentials** (stored
+in Windows Credential Manager, keyed by host) and Claude calls the `signon` tool.
 
 ### Mode 2 — headless (stdio, no window)
 
@@ -96,15 +113,19 @@ Same tools, no GUI. Best for pure automation.
 This tooling can drive a **live IBM i session** (sign-on, commands, screen data),
 so it is treated as sensitive:
 
-- **Localhost only.** The HTTP host binds `127.0.0.1` and requires a per-launch
-  bearer token (constant-time compared). The token is generated in-process and
-  never persisted.
-- **Manual start.** The in-process server never starts on its own except with the
-  explicit `--mcp` flag; the default is off.
+- **Localhost only, no token.** The HTTP host binds `127.0.0.1` and rejects any
+  non-loopback remote (defense in depth). It carries no auth token: it is reachable
+  only from this machine and only while the app is running. Trade-off: any process
+  running as the current user can reach it — the same trust boundary as your desktop
+  session. Do not enable it on a shared/multi-user machine.
+- **On by default.** Starts at launch so an MCP client can connect with no manual
+  step (toggle under Tools → *Start MCP on Startup*).
 - **Hidden fields are masked.** Non-display (password) fields are never surfaced in
   `get_screen` text or field content — only their presence is reported.
-- **No credentials in the tool.** `connect` takes a host/port/device; it holds no
-  stored passwords. Sign-on is performed on-screen like a normal 5250 session.
+- **Credentials in the OS vault.** Saved sign-on credentials live in the Windows
+  Credential Manager (DPAPI-encrypted, per-user) — never in a file, the connection
+  JSON, or logs. The `signon` tool reads the password on this machine to fill the
+  hidden field; it is never a tool parameter and never returned to the client.
 - **Production caution.** Do **not** point `connect` at a production IBM i (or any
   PCI-scoped environment) without explicit authorization. Screen contents pass into
   the model's context.
