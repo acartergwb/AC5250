@@ -11,11 +11,13 @@ public class SessionTabBar : Control
     private int _selectedIndex = -1;
     private int _hoverIndex = -1;
     private int _hoverCloseIndex = -1;
+    private bool _hoverNewTab;
     private const int TabHeight = 34;
     private const int TabPadding = 16;
     private const int CloseButtonSize = 16;
     private const int MaxTabWidth = 220;
     private const int MinTabWidth = 100;
+    private const int NewTabButtonSize = 24;   // the "+" button glyph box
 
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public int SelectedIndex
@@ -34,6 +36,9 @@ public class SessionTabBar : Control
 
     public event EventHandler? SelectedIndexChanged;
     public event EventHandler<int>? TabCloseClicked;
+
+    /// <summary>Raised when the "+" new-tab button is clicked.</summary>
+    public event EventHandler? NewTabClicked;
 
     public SessionTabBar()
     {
@@ -115,6 +120,15 @@ public class SessionTabBar : Control
         return new Rectangle(x, y, CloseButtonSize, CloseButtonSize);
     }
 
+    /// <summary>The "+" new-tab button, sitting just past the last tab (clamped on-screen).</summary>
+    private Rectangle GetNewTabRect()
+    {
+        int x = _tabs.Count == 0 ? 4 : GetTabRect(_tabs.Count - 1).Right + 6;
+        x = Math.Min(x, Width - NewTabButtonSize - 4);
+        int y = (TabHeight - NewTabButtonSize) / 2;
+        return new Rectangle(x, y, NewTabButtonSize, NewTabButtonSize);
+    }
+
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
@@ -180,6 +194,21 @@ public class SessionTabBar : Control
                 g.DrawLine(closePen, closeRect.Right - m, closeRect.Y + m, closeRect.X + m, closeRect.Bottom - m);
             }
         }
+
+        // "+" new-tab button
+        var newRect = GetNewTabRect();
+        if (_hoverNewTab)
+        {
+            using var hoverBrush = new SolidBrush(DarkTheme.Surface);
+            FillRoundedRect(g, hoverBrush, newRect, 4);
+        }
+        var plusColor = _hoverNewTab ? DarkTheme.TextPrimary : DarkTheme.TextMuted;
+        using var plusPen = new Pen(plusColor, 1.5f);
+        int px = newRect.X + newRect.Width / 2;
+        int py = newRect.Y + newRect.Height / 2;
+        const int arm = 5;
+        g.DrawLine(plusPen, px - arm, py, px + arm, py);
+        g.DrawLine(plusPen, px, py - arm, px, py + arm);
     }
 
     private static void FillRoundedRect(Graphics g, Brush brush, Rectangle rect, int radius, bool roundBottom = true)
@@ -209,6 +238,7 @@ public class SessionTabBar : Control
         base.OnMouseMove(e);
         int newHover = -1;
         int newCloseHover = -1;
+        bool newTabHover = GetNewTabRect().Contains(e.Location);
 
         for (int i = 0; i < _tabs.Count; i++)
         {
@@ -221,11 +251,12 @@ public class SessionTabBar : Control
             }
         }
 
-        if (newHover != _hoverIndex || newCloseHover != _hoverCloseIndex)
+        if (newHover != _hoverIndex || newCloseHover != _hoverCloseIndex || newTabHover != _hoverNewTab)
         {
             _hoverIndex = newHover;
             _hoverCloseIndex = newCloseHover;
-            Cursor = newCloseHover >= 0 ? Cursors.Hand : (newHover >= 0 ? Cursors.Hand : Cursors.Default);
+            _hoverNewTab = newTabHover;
+            Cursor = (newCloseHover >= 0 || newHover >= 0 || newTabHover) ? Cursors.Hand : Cursors.Default;
             Invalidate();
         }
     }
@@ -235,6 +266,7 @@ public class SessionTabBar : Control
         base.OnMouseLeave(e);
         _hoverIndex = -1;
         _hoverCloseIndex = -1;
+        _hoverNewTab = false;
         Cursor = Cursors.Default;
         Invalidate();
     }
@@ -242,6 +274,13 @@ public class SessionTabBar : Control
     protected override void OnMouseClick(MouseEventArgs e)
     {
         base.OnMouseClick(e);
+
+        // "+" takes priority — it can overlap the trailing edge of the last tab.
+        if (GetNewTabRect().Contains(e.Location))
+        {
+            NewTabClicked?.Invoke(this, EventArgs.Empty);
+            return;
+        }
 
         for (int i = 0; i < _tabs.Count; i++)
         {
