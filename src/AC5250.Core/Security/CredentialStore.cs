@@ -55,9 +55,14 @@ public static class CredentialStore
         {
             var direct = Read(Target(host, label));
             if (direct != null) return direct;
+            // Case-insensitive match against stored labels. Don't return a null read here —
+            // "default" can be a synthetic label for a legacy bare entry, so fall through.
             foreach (var l in Labels(host))
                 if (string.Equals(l, label, StringComparison.OrdinalIgnoreCase))
-                    return Read(Target(host, l));
+                {
+                    var r = Read(Target(host, l));
+                    if (r != null) return r;
+                }
             if (string.Equals(label, DefaultLabel, StringComparison.OrdinalIgnoreCase))
                 return Read(LegacyTarget(host));
             return null;
