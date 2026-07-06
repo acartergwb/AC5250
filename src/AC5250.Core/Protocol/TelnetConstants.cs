@@ -62,6 +62,7 @@ public static class TelnetConstants
 
     // 5250 Write commands
     public const byte CMD_WRITE_TO_DISPLAY = 0x11;
+    public const byte CMD_WRITE_ERROR_CODE = 0x21;   // WEC — write the operator error line
     public const byte CMD_CLEAR_UNIT = 0x40;
     public const byte CMD_CLEAR_FORMAT_TABLE = 0x50;
     public const byte CMD_CLEAR_UNIT_ALT = 0x20;

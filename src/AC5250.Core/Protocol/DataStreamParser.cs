@@ -138,6 +138,10 @@ public class DataStreamParser
                         offset = ParseWriteToDisplay(record, offset + 1);
                         break;
 
+                    case TelnetConstants.CMD_WRITE_ERROR_CODE:
+                        offset = ParseWriteErrorCode(record, offset + 1);
+                        break;
+
                     case TelnetConstants.CMD_WRITE_STRUCTURED_FIELD:
                         offset = ParseWriteStructuredField(record, offset + 1);
                         break;
@@ -297,6 +301,31 @@ public class DataStreamParser
             }
 
             firstOrder = false;
+        }
+
+        return offset;
+    }
+
+    private int ParseWriteErrorCode(byte[] record, int offset)
+    {
+        // Write Error Code (0x21): the host writes the operator error message to the
+        // error line — the last screen row, from column 1. The message (a leading
+        // display attribute followed by characters) runs until the next command (ESC).
+        // Without this, messages like "Function key not allowed." were dropped entirely.
+        // Keyboard lock/unlock is left to the record opcode (WEC arrives under PUT_GET,
+        // which unlocks after the write), so this does not touch InputInhibited.
+        _screen.SetBufferAddress(_screen.Rows, 1); // last row, column 1 (1-based)
+
+        while (offset < record.Length)
+        {
+            byte b = record[offset];
+            if (b == ESC) break;
+
+            if (b >= 0x20 && b <= 0x3F)
+                _screen.WriteAttribute(b);
+            else
+                _screen.WriteCharacter(b);
+            offset++;
         }
 
         return offset;
