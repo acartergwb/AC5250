@@ -1,3 +1,4 @@
+using AC5250.Security;
 using AC5250.Session;
 using ModelContextProtocol;
 
@@ -17,11 +18,11 @@ public sealed class EmulatorController
     private readonly IThreadMarshal _marshal;
     private readonly Func<ConnectionSettings, TerminalSession> _createSession;
 
-    // Resolves saved sign-on credentials for a session, or null if none. Supplied by the
-    // host (the WinForms app reads them from Windows Credential Manager). Kept as a
-    // delegate so the password is never a tool parameter and never enters the MCP layer
-    // except transiently to fill the field locally.
-    private readonly Func<ConnectionSettings, (string User, string Password)?>? _credentials;
+    // Resolves saved sign-on credentials for a host, or null if none is configured. Supplied
+    // by the host as a pluggable source (Windows Credential Manager on the desktop, environment
+    // variables on a headless/cross-platform server) so the password is never a tool parameter
+    // and never enters the MCP layer except transiently to fill the field locally.
+    private readonly ICredentialSource? _credentials;
 
     // How long a wait-for-the-host operation will block by default. This is a ceiling,
     // not a fixed delay: the wait returns as soon as the host re-invites input. It is set
@@ -35,7 +36,7 @@ public sealed class EmulatorController
         SessionManager sessions,
         IThreadMarshal marshal,
         Func<ConnectionSettings, TerminalSession> createSession,
-        Func<ConnectionSettings, (string User, string Password)?>? credentials = null)
+        ICredentialSource? credentials = null)
     {
         _sessions = sessions;
         _marshal = marshal;
@@ -163,10 +164,9 @@ public sealed class EmulatorController
 
         if (_credentials is null)
             throw new McpException("Credential sign-on is not available in this host.");
-        var creds = _credentials(s.Settings);
+        var creds = _credentials.Get(s.Settings.HostName);
         if (creds is null)
-            throw new McpException(
-                $"No saved credentials for host '{s.Settings.HostName}'. Add them in the emulator: Session > Manage Saved Credentials.");
+            throw new McpException(NoCredentialsMessage(s.Settings.HostName));
 
         var (userIdx, pwIdx) = _marshal.Invoke(() => FindSignOnFields(s));
         if (userIdx < 0 || pwIdx < 0)
@@ -184,6 +184,17 @@ public sealed class EmulatorController
         _marshal.Invoke(() => s.HandleKeyAction(enter));
         await WaitForSettleAsync(s, baseline, settleMs <= 0 ? DefaultWaitMs : settleMs, ct);
         return Snapshot(s);
+    }
+
+    /// <summary>Explain where to put credentials for a host, tailored to the platform:
+    /// the desktop dialog on Windows, environment variables everywhere else.</summary>
+    private static string NoCredentialsMessage(string host)
+    {
+        var (userVar, pwVar) = EnvironmentCredentialSource.VarNamesFor(host);
+        string envHint = $"set {userVar} and {pwVar} (or {EnvironmentCredentialSource.Prefix}USER / {EnvironmentCredentialSource.Prefix}PASSWORD) in this process's environment";
+        return OperatingSystem.IsWindows()
+            ? $"No saved credentials for host '{host}'. Add them in the emulator (Session > Manage Saved Credentials), or {envHint}."
+            : $"No saved credentials for host '{host}'. On this platform, {envHint}.";
     }
 
     /// <summary>Locate the sign-on user field (first visible, non-protected input) and
