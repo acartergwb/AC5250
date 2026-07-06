@@ -66,20 +66,29 @@ dotnet run --project src/AC5250.App
 
 ## MCP integration
 
-Seven tools are exposed by **both** hosts:
+Eight tools are exposed by **both** hosts:
 
 | Tool | What it does |
 |---|---|
 | `list_sessions` | List open sessions (id, title, host, connected, active). |
-| `get_screen` | The screen as a text grid + cursor, keyboard/status flags, and the input-field list. |
+| `get_screen` | The screen as a text grid + cursor, keyboard/status flags, and the input-field list. An instant read — if `keyboardInhibited` is true the host is still working. |
 | `connect` | Open a new TN5250 session to a host and wait for the first screen. |
 | `disconnect` | Close a session. |
 | `send_text` | Type text at the cursor (client-side; does not submit). |
 | `set_field` | Set an input field's value by its index from `get_screen`. |
-| `press_key` | Press a 5250 key — AID keys (`Enter`, `F1`-`F24`, `Clear`, `Attn`, `SysReq`, `Help`, `Print`, `PageUp`, `PageDown`) submit to the host and wait for the repaint; navigation/edit keys (`Tab`, `Home`, arrows, `FieldExit`, `EraseInput`, `Reset`, …) act locally. |
+| `press_key` | Press a 5250 key — AID keys (`Enter`, `F1`-`F24`, `Clear`, `Attn`, `SysReq`, `Help`, `Print`, `PageUp`, `PageDown`) submit to the host and **block until it finishes and re-invites input** (the keyboard stays locked, "X SYSTEM", while it works), so you get the real response, not an intermediate paint; navigation/edit keys (`Tab`, `Home`, arrows, `FieldExit`, `EraseInput`, `Reset`, …) act locally. |
+| `wait_for_screen` | Block until the host finishes working and the screen is ready again — or until a given text appears — then return it. The primitive for "start a long host job, then wait for it." |
 | `signon` | Sign on to the current session using credentials the user saved on this machine (Windows Credential Manager) for the session's host. You never provide the password — it is read from the OS vault, typed into the hidden field locally, and never returned. |
 
-A typical loop: `get_screen` → `set_field`/`send_text` → `press_key Enter` → `get_screen`.
+A typical loop: `get_screen` → `set_field`/`send_text` → `press_key Enter` → `get_screen`. For an
+operation the host takes a while on, `press_key` already waits; `wait_for_screen` is there for the
+rest (unsolicited updates, or waiting for a specific screen to land).
+
+**Waiting / readiness.** Pressing an AID key locks the keyboard until the host replies, so the
+tools treat an inhibited keyboard as "the system is still working" and keep waiting through it
+(up to a 30 s ceiling, tunable via `timeoutMs`) rather than returning a half-painted screen. If a
+wait hits the ceiling, the returned screen still carries `keyboardInhibited=true` so the client
+knows to wait again.
 
 ### Mode 1 — in-process (drive the visible desktop app)
 
@@ -104,7 +113,11 @@ claude mcp add ac5250 -- dotnet /abs/path/src/AC5250.Headless/bin/Debug/net10.0/
 # or, against a self-contained/published build, point directly at ac5250-mcp.exe
 ```
 
-Same tools, no GUI. Best for pure automation.
+Same tools, no GUI — best for unattended automation: the MCP client spawns the process on
+demand, so there is no app to start first. `signon` works here too, reading credentials from the
+same Windows Credential Manager (same per-user vault the desktop app writes; passwords are never
+stored in the process or returned). Manage the saved entries from the desktop app's **Session →
+Manage Saved Credentials** dialog, or Windows' *Credential Manager* control panel.
 
 ---
 
