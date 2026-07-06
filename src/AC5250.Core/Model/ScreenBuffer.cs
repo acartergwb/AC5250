@@ -232,7 +232,14 @@ public class ScreenBuffer
         int currentPos = _bufferRow * Cols + _bufferCol;
         int total = _characters.Length;
 
-        if (targetPos <= currentPos)
+        // Wrap only when the stop address is STRICTLY before the current position.
+        // A stop address EQUAL to the current position is a zero-length repeat (a
+        // no-op), NOT a full-screen wrap — S2K emits exactly this (e.g. WMETCR's
+        // `SBA; non-display attr; RA to the just-advanced position`). Using `<=`
+        // here sent that case around the whole buffer, filling all 1920 cells and
+        // erasing everything painted before it (title, prompts, the function-key
+        // legend) — leaving only content written after the RA. Matches PCOMM/ACS.
+        if (targetPos < currentPos)
         {
             // Wrap around
             while (currentPos < total)
