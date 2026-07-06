@@ -11,6 +11,7 @@ public class TerminalSession : IDisposable
     private readonly SynchronizationContext? _dispatcher;
     private readonly List<string> _debugLog = new();
     private bool _firstDataReceived;
+    private bool _closed;   // guards ConnectionClosed so it fires exactly once
 
     /// <summary>Stable short id used by the MCP layer to address this session.</summary>
     public string Id { get; } = Guid.NewGuid().ToString("N")[..8];
@@ -64,7 +65,7 @@ public class TerminalSession : IDisposable
         }
         catch (Exception ex)
         {
-            ConnectionClosed?.Invoke($"Connection failed: {ex.Message}");
+            ReportClosed($"Connection failed: {ex.Message}");
             throw;
         }
     }
@@ -428,8 +429,14 @@ public class TerminalSession : IDisposable
         }
     }
 
-    private void OnDisconnected(string reason)
+    private void OnDisconnected(string reason) => ReportClosed(reason);
+
+    /// <summary>Raise <see cref="ConnectionClosed"/> at most once, so a user-initiated
+    /// disconnect and the socket read-loop's follow-up error don't double-report.</summary>
+    private void ReportClosed(string reason)
     {
+        if (_closed) return;
+        _closed = true;
         ConnectionClosed?.Invoke(reason);
     }
 
@@ -457,6 +464,7 @@ public class TerminalSession : IDisposable
     public void Disconnect()
     {
         _client.Disconnect();
+        ReportClosed("Disconnected.");
     }
 
     public void Dispose()

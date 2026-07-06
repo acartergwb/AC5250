@@ -19,8 +19,18 @@ public class MainForm : Form
     private readonly SessionTabBar _tabBar;
     private readonly Panel _terminalPanel;
     private readonly MenuStrip _menu;
-    private readonly Dictionary<TerminalSession, TerminalControl> _sessionControls = new();
-    private TerminalControl? _activeControl;
+
+    // Each tab hosts either a Home page (WelcomePanel, no session) or a live session
+    // (a TerminalControl bound to a TerminalSession). A tab is no longer forced to be a session.
+    private readonly List<TabContext> _tabs = new();
+    private TabContext? _activeTab;
+    private TabContext? _pendingTab;   // tab awaiting the next CreateSession (a UI-initiated connect)
+
+    // Menu items whose enabled state is recomputed when their menu opens.
+    private ToolStripMenuItem? _connectItem;
+    private ToolStripMenuItem? _disconnectItem;
+    private ToolStripMenuItem? _startMcpItem;
+    private ToolStripMenuItem? _stopMcpItem;
 
     // MCP in-process host (started on demand via the Tools menu, or at launch with --mcp).
     private const int McpPort = 8250;
@@ -57,6 +67,7 @@ public class MainForm : Form
         _tabBar = new SessionTabBar();
         _tabBar.SelectedIndexChanged += OnTabChanged;
         _tabBar.TabCloseClicked += OnTabClose;
+        _tabBar.NewTabClicked += (_, _) => OpenHomeTab();
 
         // Terminal panel
         _terminalPanel = new Panel
@@ -71,36 +82,33 @@ public class MainForm : Form
         Controls.Add(_tabBar);
         Controls.Add(_menu);
 
-        // Show welcome screen
-        ShowWelcome();
-
-        // Wire session manager events
+        // Wire session manager events. SessionAdded also fires for sessions created by the
+        // MCP host (Claude), so the UI must build a tab/control for those too.
         _sessionManager.SessionAdded += OnSessionAdded;
         _sessionManager.SessionRemoved += OnSessionRemoved;
 
         KeyPreview = true;
     }
 
-    private void ShowWelcome()
+    /// <summary>Open a new Home tab (the connection chooser). Used by "+", Session ▸ New
+    /// Session, and whenever the window would otherwise have no tabs.</summary>
+    private void OpenHomeTab()
     {
-        var welcome = new WelcomePanel();
-        welcome.ConnectClicked += (_, _) => OnConnect(this, EventArgs.Empty);
-        welcome.LaunchProfile += (_, settings) => ConnectWith(settings);
-        welcome.Dock = DockStyle.Fill;
+        var welcome = new WelcomePanel { Dock = DockStyle.Fill, Visible = false };
+        var ctx = new TabContext { Content = welcome };
+        welcome.ConnectClicked += (_, _) => StartConnectFlow(ctx);           // "+ New connection" / Connect
+        welcome.LaunchProfile += (_, settings) => StartSessionInTab(ctx, settings); // quick-launch a saved profile
         _terminalPanel.Controls.Add(welcome);
+        _tabs.Add(ctx);
+        _tabBar.AddTab("Home", ctx);   // selects the tab -> OnTabChanged -> ActivateTab
     }
 
-    private void HideWelcome()
+    /// <summary>Prompt for connection details, then bring the connection up in the given tab.</summary>
+    private void StartConnectFlow(TabContext ctx)
     {
-        foreach (Control c in _terminalPanel.Controls)
-        {
-            if (c is WelcomePanel)
-            {
-                _terminalPanel.Controls.Remove(c);
-                c.Dispose();
-                break;
-            }
-        }
+        using var dialog = new ConnectDialog();
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        StartSessionInTab(ctx, dialog.Settings);
     }
 
     private MenuStrip CreateMenu()
@@ -114,14 +122,19 @@ public class MainForm : Form
         };
 
         var fileMenu = CreateMenuItem("&File");
-        fileMenu.DropDownItems.Add(CreateMenuItem("&Connect...", Keys.Control | Keys.N, OnConnect));
-        fileMenu.DropDownItems.Add(CreateMenuItem("&Disconnect", Keys.Control | Keys.W, OnDisconnect));
+        _connectItem = CreateMenuItem("&Connect...", Keys.Control | Keys.N, OnConnect);
+        _disconnectItem = CreateMenuItem("&Disconnect", onClick: OnDisconnect);
+        fileMenu.DropDownItems.Add(_connectItem);
+        fileMenu.DropDownItems.Add(_disconnectItem);
+        fileMenu.DropDownItems.Add(new ToolStripSeparator());
+        fileMenu.DropDownItems.Add(CreateMenuItem("&Manage Saved Connections...", onClick: OnManageConnections));
         fileMenu.DropDownItems.Add(new ToolStripSeparator());
         fileMenu.DropDownItems.Add(CreateMenuItem("E&xit", Keys.Alt | Keys.F4, (_, _) => Close()));
+        fileMenu.DropDownOpening += (_, _) => UpdateFileMenuState();
         menu.Items.Add(fileMenu);
 
         var sessionMenu = CreateMenuItem("&Session");
-        sessionMenu.DropDownItems.Add(CreateMenuItem("&New Session...", Keys.Control | Keys.T, OnConnect));
+        sessionMenu.DropDownItems.Add(CreateMenuItem("&New Session", Keys.Control | Keys.T, (_, _) => OpenHomeTab()));
         sessionMenu.DropDownItems.Add(CreateMenuItem("&Close Session", Keys.Control | Keys.W, OnCloseSession));
         sessionMenu.DropDownItems.Add(new ToolStripSeparator());
         sessionMenu.DropDownItems.Add(CreateMenuItem("Sign &On (saved credentials)", onClick: OnSignOn));
@@ -144,14 +157,17 @@ public class MainForm : Form
         menu.Items.Add(viewMenu);
 
         var toolsMenu = CreateMenuItem("&Tools");
-        toolsMenu.DropDownItems.Add(CreateMenuItem("&Start MCP Server", Keys.Control | Keys.M, OnStartMcp));
-        toolsMenu.DropDownItems.Add(CreateMenuItem("S&top MCP Server", onClick: OnStopMcp));
+        _startMcpItem = CreateMenuItem("&Start MCP Server", Keys.Control | Keys.M, OnStartMcp);
+        _stopMcpItem = CreateMenuItem("S&top MCP Server", onClick: OnStopMcp);
+        toolsMenu.DropDownItems.Add(_startMcpItem);
+        toolsMenu.DropDownItems.Add(_stopMcpItem);
         toolsMenu.DropDownItems.Add(new ToolStripSeparator());
         toolsMenu.DropDownItems.Add(CreateMenuItem("MCP Connection &Info...", onClick: OnMcpInfo));
         toolsMenu.DropDownItems.Add(new ToolStripSeparator());
         _mcpStartupMenuItem = CreateMenuItem("Start MCP on &Startup", onClick: OnToggleMcpStartup);
         _mcpStartupMenuItem.Checked = _settings.StartMcpOnStartup;
         toolsMenu.DropDownItems.Add(_mcpStartupMenuItem);
+        toolsMenu.DropDownOpening += (_, _) => UpdateToolsMenuState();
         menu.Items.Add(toolsMenu);
 
         var helpMenu = CreateMenuItem("&Help");
@@ -174,44 +190,51 @@ public class MainForm : Form
         return item;
     }
 
+    // File ▸ Connect acts on the active tab: a Home tab prompts for connection details;
+    // a disconnected session tab reconnects using its settings. Disabled while connected.
     private void OnConnect(object? sender, EventArgs e)
     {
-        using var dialog = new ConnectDialog();
-        if (dialog.ShowDialog(this) != DialogResult.OK)
-            return;
-
-        ConnectWith(dialog.Settings);
+        var ctx = _activeTab;
+        if (ctx == null) { OpenHomeTab(); return; }
+        if (ctx.Session is { IsConnected: true }) return;                        // nothing to connect
+        if (ctx.Session != null) StartSessionInTab(ctx, ctx.Session.Settings);   // reconnect same settings
+        else StartConnectFlow(ctx);                                              // Home tab -> dialog
     }
 
-    /// <summary>Open and connect a session directly from settings (quick-launch), no dialog.</summary>
-    private async void ConnectWith(ConnectionSettings settings)
+    /// <summary>Bring a connection up inside the given tab, replacing its current content
+    /// (a Home page, or a previous disconnected session).</summary>
+    private async void StartSessionInTab(TabContext ctx, ConnectionSettings settings)
     {
-        HideWelcome();
-
         _uiContext ??= SynchronizationContext.Current;
+
+        // If the tab already holds a (disconnected) session, tear it down first — but null the
+        // ref so OnSessionRemoved doesn't delete the tab; we're reusing it.
+        if (ctx.Session is { } dead)
+        {
+            ctx.Session = null;
+            _sessionManager.CloseSession(dead);
+        }
+
+        _pendingTab = ctx;   // OnSessionAdded places the new terminal control into this tab
         var session = _sessionManager.CreateSession(settings, _uiContext);
         session.UppercaseInput = _uppercaseInput;
 
-        try
-        {
-            await session.ConnectAsync();
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show($"Failed to connect:\n{ex.Message}", "AC5250",
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
-            _sessionManager.CloseSession(session);
-        }
+        try { await session.ConnectAsync(); }
+        catch { /* ConnectionClosed already fired → the tab shows [Closed] + a toast */ }
     }
 
+    // File ▸ Disconnect drops the socket but KEEPS the tab (as [Closed]) so it can be
+    // reconnected. Full teardown (removing the tab) is Close Session / the tab's ✕.
     private void OnDisconnect(object? sender, EventArgs e)
     {
-        var session = _sessionManager.ActiveSession;
-        if (session != null)
-            _sessionManager.CloseSession(session);
+        if (_activeTab?.Session is { IsConnected: true } s)
+            s.Disconnect();
     }
 
-    private void OnCloseSession(object? sender, EventArgs e) => OnDisconnect(sender, e);
+    private void OnCloseSession(object? sender, EventArgs e)
+    {
+        if (_activeTab is { } ctx) CloseTab(ctx);
+    }
 
     protected override void OnLoad(EventArgs e)
     {
@@ -219,6 +242,9 @@ public class MainForm : Form
         // Capture the WinForms synchronization context; sessions and the MCP host
         // use it to marshal host-driven parsing and MCP calls onto this thread.
         _uiContext = SynchronizationContext.Current;
+
+        // Start on the connection chooser.
+        OpenHomeTab();
 
         // Start the MCP server automatically unless the user turned it off, so an MCP
         // client (Claude) can connect without any manual step. --mcp forces it on too.
@@ -394,6 +420,48 @@ public class MainForm : Form
 
     private void OnSessionAdded(TerminalSession session)
     {
+        var control = BuildTerminalControl(session);
+
+        TabContext ctx;
+        if (_pendingTab is { } pending)
+        {
+            // UI-initiated: reuse the initiating tab, swapping its Home/old content for the terminal.
+            _pendingTab = null;
+            ctx = pending;
+            SwapTabContent(ctx, control);
+            ctx.Session = session;
+            int idx = _tabBar.FindTabByTag(ctx);
+            if (idx >= 0) _tabBar.SetTabTitle(idx, session.Title);
+        }
+        else
+        {
+            // MCP-initiated (Claude called connect with no initiating tab): open a fresh session tab.
+            ctx = new TabContext { Content = control, Session = session };
+            _tabs.Add(ctx);
+            _terminalPanel.Controls.Add(control);
+            _tabBar.AddTab(session.Title, ctx);   // selects the tab -> OnTabChanged -> ActivateTab
+        }
+
+        session.ConnectionClosed += reason =>
+        {
+            if (InvokeRequired) BeginInvoke(() => OnSessionDisconnected(session, reason));
+            else OnSessionDisconnected(session, reason);
+        };
+
+        session.StatusMessage += msg =>
+        {
+            if (InvokeRequired) BeginInvoke(() => UpdateStatus(session, msg));
+            else UpdateStatus(session, msg);
+        };
+
+        if (!string.IsNullOrEmpty(_mcpStartup?.LogFile))
+            session.DebugLogged += AppendLog;
+
+        ActivateTab(ctx);
+    }
+
+    private TerminalControl BuildTerminalControl(TerminalSession session)
+    {
         var control = new TerminalControl { Dock = DockStyle.Fill, Visible = false };
         control.AttachBuffer(session.Screen);
         control.HostInfo = session.Settings.DisplayName;
@@ -413,30 +481,20 @@ public class MainForm : Form
             kpe.Handled = true;
         };
 
-        _terminalPanel.Controls.Add(control);
-        _sessionControls[session] = control;
+        return control;
+    }
 
-        _tabBar.AddTab(session.Title, session);
-        ActivateSession(session);
-
-        session.ConnectionClosed += reason =>
+    /// <summary>Replace a tab's content control (Home page or old terminal) with a new one.</summary>
+    private void SwapTabContent(TabContext ctx, Control newContent)
+    {
+        if (ctx.Content is { } old)
         {
-            if (InvokeRequired)
-                BeginInvoke(() => OnSessionDisconnected(session, reason));
-            else
-                OnSessionDisconnected(session, reason);
-        };
-
-        session.StatusMessage += msg =>
-        {
-            if (InvokeRequired)
-                BeginInvoke(() => UpdateStatus(session, msg));
-            else
-                UpdateStatus(session, msg);
-        };
-
-        if (!string.IsNullOrEmpty(_mcpStartup?.LogFile))
-            session.DebugLogged += AppendLog;
+            _terminalPanel.Controls.Remove(old);
+            (old as TerminalControl)?.DetachBuffer();
+            old.Dispose();
+        }
+        ctx.Content = newContent;
+        _terminalPanel.Controls.Add(newContent);
     }
 
     private readonly object _logLock = new();
@@ -452,80 +510,125 @@ public class MainForm : Form
         catch { /* diagnostics only */ }
     }
 
+    // Fires only for teardown we didn't start from the UI (e.g. the MCP `disconnect` tool).
+    // UI-initiated closes null ctx.Session first, so this finds nothing and no-ops then.
     private void OnSessionRemoved(TerminalSession session)
     {
-        if (!_sessionControls.TryGetValue(session, out var control)) return;
-
-        control.DetachBuffer();
-        _terminalPanel.Controls.Remove(control);
-        control.Dispose();
-        _sessionControls.Remove(session);
-
-        int tabIdx = _tabBar.FindTabByTag(session);
-        if (tabIdx >= 0) _tabBar.RemoveTabAt(tabIdx);
-
-        if (_sessionControls.Count == 0)
-        {
-            _activeControl = null;
-            ShowWelcome();
-        }
+        var ctx = FindContextBySession(session);
+        if (ctx == null) return;
+        ctx.Session = null;
+        RemoveTab(ctx);
     }
 
+    // Socket dropped (host, error, or user Disconnect): keep the tab as [Closed] and toast.
     private void OnSessionDisconnected(TerminalSession session, string reason)
     {
-        if (_sessionControls.TryGetValue(session, out var control))
+        var ctx = FindContextBySession(session);
+        if (ctx == null) return;
+        if (ctx.Content is TerminalControl tc)
         {
-            control.HostInfo = $"Disconnected: {reason}";
-            int tabIdx = _tabBar.FindTabByTag(session);
-            if (tabIdx >= 0) _tabBar.SetTabTitle(tabIdx, $"[Closed] {session.Title}");
-            control.Invalidate();
+            tc.HostInfo = $"Disconnected: {reason}";
+            tc.Invalidate();
         }
+        int idx = _tabBar.FindTabByTag(ctx);
+        if (idx >= 0) _tabBar.SetTabTitle(idx, $"[Closed] {session.Title}");
+        ShowDisconnectToast(session.Title, reason);
     }
 
     private void UpdateStatus(TerminalSession session, string msg)
     {
-        if (_sessionControls.TryGetValue(session, out var control))
+        if (FindContextBySession(session)?.Content is TerminalControl tc)
         {
-            control.HostInfo = msg;
-            control.Invalidate();
+            tc.HostInfo = msg;
+            tc.Invalidate();
         }
     }
 
     private void OnTabChanged(object? sender, EventArgs e)
     {
-        var tag = _tabBar.GetTabTag(_tabBar.SelectedIndex);
-        if (tag is TerminalSession session)
-            ActivateSession(session);
+        if (_tabBar.SelectedIndex >= 0 && _tabBar.GetTabTag(_tabBar.SelectedIndex) is TabContext ctx)
+            ActivateTab(ctx);
     }
 
     private void OnTabClose(object? sender, int index)
     {
-        var tag = _tabBar.GetTabTag(index);
-        if (tag is TerminalSession session)
-            _sessionManager.CloseSession(session);
+        if (_tabBar.GetTabTag(index) is TabContext ctx) CloseTab(ctx);
     }
 
-    private void ActivateSession(TerminalSession session)
+    /// <summary>Fully close a tab: tear down its session (if any) and remove the tab.</summary>
+    private void CloseTab(TabContext ctx)
     {
-        // Hide all controls
-        foreach (var ctrl in _sessionControls.Values)
-            ctrl.Visible = false;
-
-        if (_sessionControls.TryGetValue(session, out var control))
+        if (ctx.Session is { } s)
         {
-            control.Visible = true;
-            control.BringToFront();
-            control.Focus();
-            _activeControl = control;
+            ctx.Session = null;                  // suppress OnSessionRemoved's own removal
+            _sessionManager.CloseSession(s);
         }
+        RemoveTab(ctx);
+    }
 
-        _sessionManager.SetActive(session);
+    private void RemoveTab(TabContext ctx)
+    {
+        int idx = _tabBar.FindTabByTag(ctx);
+        if (ctx.Content is { } c)
+        {
+            _terminalPanel.Controls.Remove(c);
+            (c as TerminalControl)?.DetachBuffer();
+            c.Dispose();
+        }
+        _tabs.Remove(ctx);
+        if (idx >= 0) _tabBar.RemoveTabAt(idx);   // fires OnTabChanged for the new selection
+        if (ReferenceEquals(_activeTab, ctx)) _activeTab = null;
+        if (_tabs.Count == 0) OpenHomeTab();      // never leave the window tab-less
+    }
+
+    private void ActivateTab(TabContext ctx)
+    {
+        foreach (var t in _tabs) t.Content.Visible = false;
+        ctx.Content.Visible = true;
+        ctx.Content.BringToFront();
+        ctx.Content.Focus();
+        _activeTab = ctx;
+        if (ctx.Session is { } s) _sessionManager.SetActive(s);
+    }
+
+    private TabContext? FindContextBySession(TerminalSession session)
+    {
+        foreach (var t in _tabs)
+            if (ReferenceEquals(t.Session, session)) return t;
+        return null;
+    }
+
+    private void UpdateFileMenuState()
+    {
+        bool connected = _activeTab?.Session is { IsConnected: true };
+        if (_connectItem != null) _connectItem.Enabled = !connected;   // Home or disconnected → can connect
+        if (_disconnectItem != null) _disconnectItem.Enabled = connected;
+    }
+
+    private void UpdateToolsMenuState()
+    {
+        if (_startMcpItem != null) _startMcpItem.Enabled = _mcpHost == null;
+        if (_stopMcpItem != null) _stopMcpItem.Enabled = _mcpHost != null;
+    }
+
+    private void OnManageConnections(object? sender, EventArgs e)
+    {
+        using var dlg = new ManageConnectionsDialog();
+        dlg.ShowDialog(this);
+    }
+
+    private void ShowDisconnectToast(string title, string reason)
+    {
+        var toast = new ToastNotification(title, $"Disconnected — {reason}");
+        Controls.Add(toast);
+        toast.BringToFront();
+        toast.ShowAt(this);
     }
 
     private void SetColorScheme(ColorScheme scheme)
     {
-        foreach (var control in _sessionControls.Values)
-            control.Colors = scheme;
+        foreach (var t in _tabs)
+            if (t.Content is TerminalControl tc) tc.Colors = scheme;
     }
 
     private void OnAbout(object? sender, EventArgs e)
@@ -587,6 +690,16 @@ public class MainForm : Form
         }
         _sessionManager.CloseAll();
         base.OnFormClosing(e);
+    }
+
+    /// <summary>What a single tab is showing. A tab holds a content control that is either a
+    /// <see cref="WelcomePanel"/> (Home — no session yet) or a <see cref="TerminalControl"/>
+    /// bound to <see cref="Session"/>. IsHome ⇔ Session is null.</summary>
+    private sealed class TabContext
+    {
+        public Control Content = null!;
+        public TerminalSession? Session;
+        public bool IsHome => Session == null;
     }
 }
 
@@ -955,5 +1068,172 @@ internal class KeyMappingsDialog : Form
             AutoSize = true,
             Padding = new Padding(0, 3, 0, 3),
         }, 1, row);
+    }
+}
+
+/// <summary>
+/// A small non-modal toast that floats at the bottom-right of the window and auto-dismisses.
+/// Added to the form's Controls and brought to front; removes itself on timeout or click.
+/// </summary>
+internal sealed class ToastNotification : Panel
+{
+    private readonly System.Windows.Forms.Timer _timer = new() { Interval = 4500 };
+
+    public ToastNotification(string title, string message)
+    {
+        DoubleBuffered = true;
+        Size = new Size(300, 62);
+        BackColor = DarkTheme.SurfaceLighter;
+
+        var titleLabel = new Label
+        {
+            Text = title,
+            Location = new Point(14, 9),
+            Size = new Size(274, 20),
+            ForeColor = DarkTheme.Accent,
+            Font = DarkTheme.UIFontBold,
+            BackColor = Color.Transparent,
+            Enabled = false,   // let clicks fall through to the panel (dismiss)
+        };
+        var msgLabel = new Label
+        {
+            Text = message,
+            Location = new Point(14, 31),
+            Size = new Size(274, 22),
+            ForeColor = DarkTheme.TextSecondary,
+            Font = DarkTheme.UIFont,
+            BackColor = Color.Transparent,
+            AutoEllipsis = true,
+            Enabled = false,
+        };
+        Controls.Add(titleLabel);
+        Controls.Add(msgLabel);
+
+        _timer.Tick += (_, _) => Dismiss();
+    }
+
+    public void ShowAt(Form owner)
+    {
+        Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+        Location = new Point(owner.ClientSize.Width - Width - 18, owner.ClientSize.Height - Height - 18);
+        _timer.Start();
+    }
+
+    protected override void OnMouseClick(MouseEventArgs e) => Dismiss();
+
+    private void Dismiss()
+    {
+        _timer.Stop();
+        Parent?.Controls.Remove(this);
+        Dispose();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        var g = e.Graphics;
+        using var border = new Pen(DarkTheme.Border);
+        g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
+        using var accent = new SolidBrush(DarkTheme.Danger);
+        g.FillRectangle(accent, 0, 0, 3, Height);
+    }
+}
+
+/// <summary>
+/// Dark-themed manager for saved connections (File ▸ Manage Saved Connections). Lists the
+/// entries in <see cref="ConnectionStore"/> and adds/edits (via <see cref="ConnectDialog"/>
+/// in save-only mode) or deletes them. Does not connect anything.
+/// </summary>
+internal sealed class ManageConnectionsDialog : Form
+{
+    private readonly ListBox _list;
+    private List<ConnectionSettings> _items = new();
+
+    public ManageConnectionsDialog()
+    {
+        Text = "Manage Saved Connections";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        StartPosition = FormStartPosition.CenterParent;
+        ClientSize = new Size(444, 316);
+        BackColor = DarkTheme.Surface;
+        ForeColor = DarkTheme.TextPrimary;
+        Font = DarkTheme.UIFont;
+        HandleCreated += (_, _) => MainForm.ApplyDarkTitleBar(this);
+
+        Controls.Add(new Label
+        {
+            Text = "Saved Connections",
+            Font = new Font("Segoe UI", 13f, FontStyle.Bold),
+            ForeColor = DarkTheme.TextPrimary,
+            Location = new Point(16, 14),
+            AutoSize = true,
+        });
+
+        _list = new ListBox
+        {
+            Location = new Point(16, 48),
+            Size = new Size(300, 252),
+            BackColor = DarkTheme.Background,
+            ForeColor = DarkTheme.TextPrimary,
+            BorderStyle = BorderStyle.FixedSingle,
+            Font = DarkTheme.UIFont,
+            IntegralHeight = false,
+        };
+        _list.DoubleClick += (_, _) => EditSelected();
+        Controls.Add(_list);
+
+        const int bx = 328;
+        AddButton("New…", bx, 48, (_, _) =>
+        {
+            using var d = new ConnectDialog(saveOnly: true);
+            if (d.ShowDialog(this) == DialogResult.OK) Reload();
+        });
+        AddButton("Edit…", bx, 88, (_, _) => EditSelected());
+        AddButton("Delete", bx, 128, (_, _) => DeleteSelected());
+        AddButton("Close", bx, 270, (_, _) => Close());
+
+        Reload();
+    }
+
+    private void EditSelected()
+    {
+        int i = _list.SelectedIndex;
+        if (i < 0 || i >= _items.Count) return;
+        using var d = new ConnectDialog(_items[i], saveOnly: true);
+        if (d.ShowDialog(this) == DialogResult.OK) Reload();
+    }
+
+    private void DeleteSelected()
+    {
+        int i = _list.SelectedIndex;
+        if (i < 0 || i >= _items.Count) return;
+        ConnectionStore.Remove(_items[i].DisplayName);
+        Reload();
+    }
+
+    private void Reload()
+    {
+        _items = ConnectionStore.Load();
+        _list.Items.Clear();
+        foreach (var c in _items) _list.Items.Add(c.DisplayName);
+    }
+
+    private void AddButton(string text, int x, int y, EventHandler onClick)
+    {
+        var b = new Button
+        {
+            Text = text,
+            Location = new Point(x, y),
+            Size = new Size(100, 30),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = DarkTheme.SurfaceLighter,
+            ForeColor = DarkTheme.TextPrimary,
+            Font = DarkTheme.UIFont,
+        };
+        b.FlatAppearance.BorderColor = DarkTheme.Border;
+        b.Click += onClick;
+        Controls.Add(b);
     }
 }
