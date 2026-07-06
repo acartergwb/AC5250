@@ -16,6 +16,8 @@ internal sealed class CredentialsDialog : Form
     private readonly TextBox _userBox = new();
     private readonly TextBox _pwBox = new();
     private List<(string Host, string Label, string User)> _entries = new();
+    private string? _editHost;    // the entry currently loaded from the list (null = creating new)
+    private string? _editLabel;
 
     public CredentialsDialog()
     {
@@ -62,11 +64,13 @@ internal sealed class CredentialsDialog : Form
         _pwBox.UseSystemPasswordChar = true;
         _pwBox.PlaceholderText = "leave blank to keep, or re-enter to change";
 
-        var save = MakeButton("Save", 110, 338, 84);
+        var newBtn = MakeButton("New", 16, 338, 60);
+        newBtn.Click += OnNew;
+        var save = MakeButton("Save", 82, 338, 66);
         save.Click += OnSave;
-        var del = MakeButton("Delete", 200, 338, 84);
+        var del = MakeButton("Delete", 154, 338, 66);
         del.Click += OnDelete;
-        var def = MakeButton("Set Default", 290, 338, 90);
+        var def = MakeButton("Set Default", 226, 338, 96);
         def.Click += OnSetDefault;
         var close = MakeButton("Close", 386, 338, 78);
         close.DialogResult = DialogResult.OK;
@@ -108,6 +112,8 @@ internal sealed class CredentialsDialog : Form
         _labelBox.Text = _entries[i].Label;
         _userBox.Text = _entries[i].User;
         _pwBox.Text = ""; // never surface stored passwords
+        _editHost = _entries[i].Host;   // remember what we're editing, so a rename removes the original
+        _editLabel = _entries[i].Label;
     }
 
     private string LabelOrDefault() =>
@@ -124,11 +130,14 @@ internal sealed class CredentialsDialog : Form
         }
         string label = LabelOrDefault();
 
-        // Editing an existing entry with the password left blank keeps the stored one.
+        // Password left blank keeps the stored one — of the entry being edited (so a rename
+        // still keeps it), or of the target host/label when creating fresh.
         string password = _pwBox.Text;
         if (password.Length == 0)
         {
-            var existing = CredentialStore.Get(host, label);
+            var existing = _editHost != null
+                ? CredentialStore.Get(_editHost, _editLabel)
+                : CredentialStore.Get(host, label);
             if (existing is null)
             {
                 _pwBox.BackColor = Color.FromArgb(60, 30, 30);
@@ -137,26 +146,58 @@ internal sealed class CredentialsDialog : Form
             }
             password = existing.Value.Password;
         }
+
+        // Renaming/moving an existing entry: remove the original so we don't leave a duplicate.
+        if (_editHost != null &&
+            (!string.Equals(_editHost, host, StringComparison.OrdinalIgnoreCase) ||
+             !string.Equals(_editLabel, label, StringComparison.OrdinalIgnoreCase)))
+            CredentialStore.Delete(_editHost, _editLabel!);
+
         CredentialStore.Save(host, label, _userBox.Text.Trim(), password);
         _pwBox.Text = "";
         Refresh_();
+        SelectEntry(host, label);
     }
 
     private void OnDelete(object? sender, EventArgs e)
     {
-        string host = _hostBox.Text.Trim();
+        string host = _editHost ?? _hostBox.Text.Trim();
+        string label = _editLabel ?? LabelOrDefault();
         if (string.IsNullOrEmpty(host)) return;
-        CredentialStore.Delete(host, LabelOrDefault());
-        _hostBox.Text = _labelBox.Text = _userBox.Text = _pwBox.Text = "";
+        CredentialStore.Delete(host, label);
+        ClearForm();
         Refresh_();
     }
 
     private void OnSetDefault(object? sender, EventArgs e)
     {
-        string host = _hostBox.Text.Trim();
+        string host = _editHost ?? _hostBox.Text.Trim();
+        string label = _editLabel ?? LabelOrDefault();
         if (string.IsNullOrEmpty(host)) return;
-        CredentialStore.SetDefaultLabel(host, LabelOrDefault());
+        CredentialStore.SetDefaultLabel(host, label);
         Refresh_();
+        SelectEntry(host, label);
+    }
+
+    private void OnNew(object? sender, EventArgs e) => ClearForm();
+
+    private void ClearForm()
+    {
+        _editHost = _editLabel = null;
+        _list.ClearSelected();
+        _hostBox.Text = _labelBox.Text = _userBox.Text = _pwBox.Text = "";
+        _hostBox.Focus();
+    }
+
+    private void SelectEntry(string host, string label)
+    {
+        for (int i = 0; i < _entries.Count; i++)
+            if (string.Equals(_entries[i].Host, host, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(_entries[i].Label, label, StringComparison.OrdinalIgnoreCase))
+            {
+                _list.SelectedIndex = i;   // fires OnSelect -> refreshes the edit target
+                return;
+            }
     }
 
     private Label AddLabel(string text, int x, int y)

@@ -35,7 +35,14 @@ public static class CredentialStore
 
     /// <summary>Add or overwrite the credential for a host under a label.</summary>
     public static void Save(string host, string label, string user, string password)
-        => Write(Target(host, label), user, password);
+    {
+        string clean = CleanLabel(label);
+        Write(Target(host, clean), user, password);
+        // A labeled "default" supersedes any pre-label bare entry (AC5250:{host}); migrate it
+        // away so we don't leave a duplicate that the UI can't address by label.
+        if (string.Equals(clean, DefaultLabel, StringComparison.OrdinalIgnoreCase))
+            CredDeleteW(LegacyTarget(host), CRED_TYPE_GENERIC, 0);
+    }
 
     /// <summary>
     /// Retrieve (user, password) for a host. With <paramref name="label"/> null, resolves the
@@ -76,9 +83,13 @@ public static class CredentialStore
 
     public static void Delete(string host, string label)
     {
-        CredDeleteW(Target(host, label), CRED_TYPE_GENERIC, 0);
+        string clean = CleanLabel(label);
+        CredDeleteW(Target(host, clean), CRED_TYPE_GENERIC, 0);
+        // "default" also covers a pre-label bare entry (AC5250:{host}) from older versions.
+        if (string.Equals(clean, DefaultLabel, StringComparison.OrdinalIgnoreCase))
+            CredDeleteW(LegacyTarget(host), CRED_TYPE_GENERIC, 0);
         // If we just removed the default, drop the now-stale default marker too.
-        if (string.Equals(GetDefaultLabel(host), CleanLabel(label), StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(GetDefaultLabel(host), clean, StringComparison.OrdinalIgnoreCase))
             CredDeleteW(MarkerTarget(host), CRED_TYPE_GENERIC, 0);
     }
 
