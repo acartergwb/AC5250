@@ -809,7 +809,7 @@ internal class AboutDialog : Form
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterParent;
-        Size = new Size(360, 220);
+        Size = new Size(360, 245);
         BackColor = DarkTheme.Surface;
         ForeColor = DarkTheme.TextPrimary;
 
@@ -825,13 +825,23 @@ internal class AboutDialog : Form
         };
         Controls.Add(title);
 
+        var version = new Label
+        {
+            Text = $"Version {AppVersion()}",
+            ForeColor = DarkTheme.TextMuted,
+            Font = DarkTheme.UIFont,
+            AutoSize = true,
+            Location = new Point(26, 56),
+        };
+        Controls.Add(version);
+
         var desc = new Label
         {
             Text = "Aidan's Custom TN5250 Terminal Emulator\nfor IBM AS/400 (iSeries) systems.\n\n.NET 10 / WinForms",
             ForeColor = DarkTheme.TextSecondary,
             Font = DarkTheme.UIFont,
             AutoSize = true,
-            Location = new Point(24, 60),
+            Location = new Point(24, 84),
         };
         Controls.Add(desc);
 
@@ -840,7 +850,7 @@ internal class AboutDialog : Form
             Text = "OK",
             DialogResult = DialogResult.OK,
             Size = new Size(80, 30),
-            Location = new Point(260, 145),
+            Location = new Point(260, 170),
             FlatStyle = FlatStyle.Flat,
             BackColor = DarkTheme.SurfaceLighter,
             ForeColor = DarkTheme.TextPrimary,
@@ -848,6 +858,18 @@ internal class AboutDialog : Form
         ok.FlatAppearance.BorderColor = DarkTheme.Border;
         Controls.Add(ok);
         AcceptButton = ok;
+    }
+
+    /// <summary>The running app version — the release version when installed/published
+    /// (stamped from the build), or the assembly version for a local build.</summary>
+    private static string AppVersion()
+    {
+        var asm = typeof(AboutDialog).Assembly;
+        var info = (System.Reflection.AssemblyInformationalVersionAttribute?)
+            System.Attribute.GetCustomAttribute(asm, typeof(System.Reflection.AssemblyInformationalVersionAttribute));
+        string v = info?.InformationalVersion ?? asm.GetName().Version?.ToString() ?? "dev";
+        int plus = v.IndexOf('+'); // strip build-metadata suffix (+<git-hash>)
+        return plus >= 0 ? v[..plus] : v;
     }
 }
 
