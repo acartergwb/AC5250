@@ -1,3 +1,4 @@
+using AC5250.Security;
 using AC5250.Session;
 using ModelContextProtocol;
 
@@ -17,19 +18,25 @@ public sealed class EmulatorController
     private readonly IThreadMarshal _marshal;
     private readonly Func<ConnectionSettings, TerminalSession> _createSession;
 
-    // Resolves saved sign-on credentials for a session, or null if none. Supplied by the
-    // host (the WinForms app reads them from Windows Credential Manager). Kept as a
-    // delegate so the password is never a tool parameter and never enters the MCP layer
-    // except transiently to fill the field locally.
-    private readonly Func<ConnectionSettings, (string User, string Password)?>? _credentials;
+    // Resolves saved sign-on credentials for a host, or null if none is configured. Supplied
+    // by the host as a pluggable source (Windows Credential Manager on the desktop, environment
+    // variables on a headless/cross-platform server) so the password is never a tool parameter
+    // and never enters the MCP layer except transiently to fill the field locally.
+    private readonly ICredentialSource? _credentials;
 
-    private const int DefaultSettleMs = 5000;
+    // How long a wait-for-the-host operation will block by default. This is a ceiling,
+    // not a fixed delay: the wait returns as soon as the host re-invites input. It is set
+    // generously because the whole point is to keep waiting while the system is working
+    // ("X SYSTEM"); a caller expecting a very long job can pass a larger timeout.
+    private const int DefaultWaitMs = 30000;
+    private const int PollMs = 40;    // how often we re-check the screen while waiting
+    private const int StableMs = 150; // screen must hold steady this long before we call it settled
 
     public EmulatorController(
         SessionManager sessions,
         IThreadMarshal marshal,
         Func<ConnectionSettings, TerminalSession> createSession,
-        Func<ConnectionSettings, (string User, string Password)?>? credentials = null)
+        ICredentialSource? credentials = null)
     {
         _sessions = sessions;
         _marshal = marshal;
@@ -63,7 +70,7 @@ public sealed class EmulatorController
         long baseline = _marshal.Invoke(() => session.Screen.Version);
 
         await session.ConnectAsync();
-        await WaitForSettleAsync(session, baseline, settleMs <= 0 ? DefaultSettleMs : settleMs, ct);
+        await WaitForSettleAsync(session, baseline, settleMs <= 0 ? DefaultWaitMs : settleMs, ct);
         return Snapshot(session);
     }
 
@@ -103,9 +110,46 @@ public sealed class EmulatorController
         _marshal.Invoke(() => s.HandleKeyAction(action));
 
         if (waitForChange && KeyNames.IsAidKey(action))
-            await WaitForSettleAsync(s, baseline, timeoutMs <= 0 ? DefaultSettleMs : timeoutMs, ct);
+            await WaitForSettleAsync(s, baseline, timeoutMs <= 0 ? DefaultWaitMs : timeoutMs, ct);
 
         return Snapshot(s);
+    }
+
+    /// <summary>
+    /// Block until the host has finished working and the screen is ready for input again
+    /// (optionally until specific text appears), or until <paramref name="timeoutMs"/>
+    /// elapses. Unlike a bare <c>get_screen</c>, this keeps polling while the keyboard is
+    /// inhibited ("X SYSTEM") — the intended primitive for "start a long host job, then wait
+    /// for it." If it returns because of the timeout the snapshot still reflects the current
+    /// (possibly still-busy) screen; the caller can inspect <c>KeyboardInhibited</c>.
+    /// </summary>
+    public async Task<ScreenSnapshot> WaitForScreenAsync(
+        string? sessionId, string? containsText, int timeoutMs, CancellationToken ct)
+    {
+        var s = Resolve(sessionId);
+        int budget = timeoutMs <= 0 ? DefaultWaitMs : timeoutMs;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        long lastVer = -1;
+        long lastChangeAt = 0;
+
+        while (true)
+        {
+            var (ver, inhibited, connected, matches) = _marshal.Invoke(() =>
+                (s.Screen.Version,
+                 s.Screen.InputInhibited,
+                 s.IsConnected,
+                 string.IsNullOrEmpty(containsText) || ScreenSerializer.ContainsText(s, containsText!)));
+
+            if (ver != lastVer) { lastVer = ver; lastChangeAt = sw.ElapsedMilliseconds; }
+
+            bool stable = sw.ElapsedMilliseconds - lastChangeAt >= StableMs;
+            // Ready = keyboard handed back, the requested text (if any) is present, and the
+            // screen has stopped changing. Also stop if the session dropped or we time out.
+            if ((!inhibited && matches && stable) || !connected || sw.ElapsedMilliseconds >= budget)
+                return Snapshot(s);
+
+            await Task.Delay(PollMs, ct);
+        }
     }
 
     /// <summary>
@@ -120,10 +164,9 @@ public sealed class EmulatorController
 
         if (_credentials is null)
             throw new McpException("Credential sign-on is not available in this host.");
-        var creds = _credentials(s.Settings);
+        var creds = _credentials.Get(s.Settings.HostName);
         if (creds is null)
-            throw new McpException(
-                $"No saved credentials for host '{s.Settings.HostName}'. Add them in the emulator: Session > Manage Saved Credentials.");
+            throw new McpException(NoCredentialsMessage(s.Settings.HostName));
 
         var (userIdx, pwIdx) = _marshal.Invoke(() => FindSignOnFields(s));
         if (userIdx < 0 || pwIdx < 0)
@@ -139,8 +182,19 @@ public sealed class EmulatorController
             throw new McpException("internal: Enter key unavailable.");
         long baseline = _marshal.Invoke(() => s.Screen.Version);
         _marshal.Invoke(() => s.HandleKeyAction(enter));
-        await WaitForSettleAsync(s, baseline, settleMs <= 0 ? DefaultSettleMs : settleMs, ct);
+        await WaitForSettleAsync(s, baseline, settleMs <= 0 ? DefaultWaitMs : settleMs, ct);
         return Snapshot(s);
+    }
+
+    /// <summary>Explain where to put credentials for a host, tailored to the platform:
+    /// the desktop dialog on Windows, environment variables everywhere else.</summary>
+    private static string NoCredentialsMessage(string host)
+    {
+        var (userVar, pwVar) = EnvironmentCredentialSource.VarNamesFor(host);
+        string envHint = $"set {userVar} and {pwVar} (or {EnvironmentCredentialSource.Prefix}USER / {EnvironmentCredentialSource.Prefix}PASSWORD) in this process's environment";
+        return OperatingSystem.IsWindows()
+            ? $"No saved credentials for host '{host}'. Add them in the emulator (Session > Manage Saved Credentials), or {envHint}."
+            : $"No saved credentials for host '{host}'. On this platform, {envHint}.";
     }
 
     /// <summary>Locate the sign-on user field (first visible, non-protected input) and
@@ -175,32 +229,39 @@ public sealed class EmulatorController
     private ScreenSnapshot Snapshot(TerminalSession s) => _marshal.Invoke(() => ScreenSerializer.Capture(s));
 
     /// <summary>
-    /// Wait for the host to finish repainting after an AID key. After a submit the
-    /// keyboard is inhibited; the host reply advances the screen version and normally
-    /// re-enables input. We treat the screen as settled once the version has advanced
-    /// past <paramref name="baseline"/> and either input is re-enabled or the screen
-    /// has been quiet for a short spell (e.g. an error message that keeps input locked).
+    /// Wait for the host to finish working after an AID key. Pressing an AID key inhibits
+    /// the keyboard (see <c>TerminalSession.SendAidKey</c>); only a host PUT_GET/INVITE reply
+    /// clears it. So an inhibited keyboard means "the system is still working" — we keep
+    /// waiting through it rather than returning a half-painted or still-busy screen. The
+    /// screen is settled once the version has advanced past <paramref name="baseline"/>,
+    /// input is re-enabled, and nothing has changed for <see cref="StableMs"/> (so a
+    /// two-stage repaint returns the final screen, not the intermediate one).
+    ///
+    /// <paramref name="timeoutMs"/> is a safety ceiling, not a target: if the host never
+    /// hands input back we return the current screen (with KeyboardInhibited still set) so
+    /// the caller can decide to wait again rather than hang forever.
     /// </summary>
     private async Task WaitForSettleAsync(TerminalSession s, long baseline, int timeoutMs, CancellationToken ct)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         long lastVer = baseline;
-        long? quietSince = null;
+        long lastChangeAt = 0;
 
         while (sw.ElapsedMilliseconds < timeoutMs)
         {
-            await Task.Delay(40, ct);
-            var (ver, inhibited) = _marshal.Invoke(() => (s.Screen.Version, s.Screen.InputInhibited));
+            await Task.Delay(PollMs, ct);
+            var (ver, inhibited, connected) =
+                _marshal.Invoke(() => (s.Screen.Version, s.Screen.InputInhibited, s.IsConnected));
 
-            if (ver != lastVer) { lastVer = ver; quietSince = null; }
+            if (!connected) return;                              // session dropped; nothing more will paint
+            if (ver != lastVer) { lastVer = ver; lastChangeAt = sw.ElapsedMilliseconds; }
 
-            if (ver > baseline)
-            {
-                if (!inhibited) return;                    // reply landed and input is enabled
-                quietSince ??= sw.ElapsedMilliseconds;
-                if (sw.ElapsedMilliseconds - quietSince > 300) return; // painted but still locked
-            }
+            // Host advanced the screen AND re-invited input AND has gone quiet: settled.
+            // While inhibited we keep waiting — that is the "waiting for the system" case.
+            if (ver > baseline && !inhibited && sw.ElapsedMilliseconds - lastChangeAt >= StableMs)
+                return;
         }
-        // Timed out: return whatever is on screen now.
+        // Ceiling hit: return the current screen. If it is still inhibited the caller sees
+        // KeyboardInhibited=true and can wait again (press_key again / wait_for_screen).
     }
 }

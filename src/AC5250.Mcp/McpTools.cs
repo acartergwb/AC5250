@@ -19,7 +19,7 @@ public static class McpTools
         => controller.ListSessions();
 
     [McpServerTool(Name = "get_screen")]
-    [Description("Return the current 5250 screen: a text grid (one line per row) to read, the cursor position, keyboard/status flags, and the list of input fields (with the index used by set_field). Non-display (password) fields are masked. Omit sessionId to use the active session.")]
+    [Description("Return the current 5250 screen: a text grid (one line per row) to read, the cursor position, keyboard/status flags, and the list of input fields (with the index used by set_field). Non-display (password) fields are masked. This is an instantaneous read — if keyboardInhibited is true the host is still working ('X SYSTEM'); use wait_for_screen to block until it is ready. Omit sessionId to use the active session.")]
     public static ScreenSnapshot GetScreen(
         EmulatorController controller,
         [Description("Session id to target; omit for the active session.")] string? sessionId = null)
@@ -74,12 +74,23 @@ public static class McpTools
         => controller.SignOnAsync(sessionId, 0, ct);
 
     [McpServerTool(Name = "press_key")]
-    [Description("Press a 5250 key. AID keys submit the screen to the host: Enter, F1-F24, Clear, Attn, SysReq, Help, Print, PageUp, PageDown. Navigation/editing keys act client-side: Tab, BackTab, Home, End, Up, Down, Left, Right, Backspace, Delete, Insert, FieldExit, Reset, EraseInput. For AID keys the tool waits for the host to repaint before returning. Omit sessionId for the active session.")]
+    [Description("Press a 5250 key. AID keys submit the screen to the host: Enter, F1-F24, Clear, Attn, SysReq, Help, Print, PageUp, PageDown. Navigation/editing keys act client-side: Tab, BackTab, Home, End, Up, Down, Left, Right, Backspace, Delete, Insert, FieldExit, Reset, EraseInput. For AID keys the tool BLOCKS until the host finishes working and re-invites input (the keyboard stays locked, 'X SYSTEM', while it works) — so the returned screen is the host's real response, not an intermediate paint. If the wait times out, the returned screen may still have keyboardInhibited=true; call wait_for_screen or press_key again. Omit sessionId for the active session.")]
     public static Task<ScreenSnapshot> PressKey(
         EmulatorController controller,
         [Description("Key name, e.g. 'Enter', 'F3', 'Tab', 'PageDown'.")] string key,
-        [Description("For AID keys, wait for the host to repaint the screen (default true).")] bool waitForChange = true,
+        [Description("For AID keys, block until the host finishes and re-invites input before returning (default true).")] bool waitForChange = true,
+        [Description("For AID keys, max ms to wait for the host (default 30000). The wait ends as soon as the host re-enables input; raise it for a known long-running operation.")] int timeoutMs = 0,
         [Description("Session id to target; omit for the active session.")] string? sessionId = null,
         CancellationToken ct = default)
-        => controller.PressKeyAsync(sessionId, key, waitForChange, 0, ct);
+        => controller.PressKeyAsync(sessionId, key, waitForChange, timeoutMs, ct);
+
+    [McpServerTool(Name = "wait_for_screen")]
+    [Description("Block until the host has finished working and the screen is ready for input again, or until timeoutMs elapses. Use this after starting a long-running host operation, or to wait for a specific screen to appear. Unlike get_screen (an instant read), this keeps polling while the keyboard is inhibited ('X SYSTEM'). Returns as soon as the keyboard is re-enabled and the screen has settled — and, if containsText is given, only once that text is present. If it returns on timeout the screen may still show keyboardInhibited=true (still busy); call it again. Omit sessionId for the active session.")]
+    public static Task<ScreenSnapshot> WaitForScreen(
+        EmulatorController controller,
+        [Description("Optional text that must appear on the screen before returning (case-insensitive).")] string? containsText = null,
+        [Description("Max ms to wait (default 30000).")] int timeoutMs = 0,
+        [Description("Session id to target; omit for the active session.")] string? sessionId = null,
+        CancellationToken ct = default)
+        => controller.WaitForScreenAsync(sessionId, containsText, timeoutMs, ct);
 }

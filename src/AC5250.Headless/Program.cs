@@ -13,8 +13,10 @@ using Microsoft.Extensions.Logging;
 //
 // The emulator's screen state is owned by a single dispatcher thread; the MCP
 // tools and the TN5250 data-stream parser both run on it, so access is serial
-// and race-free. This process holds NO credentials and connects nowhere until a
-// 'connect' tool call is made.
+// and race-free. This process stores NO credentials of its own and connects
+// nowhere until a 'connect' tool call is made. The 'signon' tool reads the
+// password from this machine's Windows Credential Manager on demand to fill the
+// hidden field locally — it is never a tool parameter and never returned.
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -29,7 +31,11 @@ var sessions = new SessionManager();
 var controller = new EmulatorController(
     sessions,
     dispatcher,
-    settings => sessions.CreateSession(settings, dispatcher.Context));
+    settings => sessions.CreateSession(settings, dispatcher.Context),
+    // Sign-on credentials from the platform-appropriate source: Windows Credential Manager
+    // on Windows, environment variables (AC5250_<HOST>_USER / _PASSWORD) elsewhere. The
+    // password is read on demand only to fill the field, never stored here, never returned.
+    AC5250.Security.CredentialSources.CreateDefault());
 
 builder.Services.AddSingleton(controller);
 
