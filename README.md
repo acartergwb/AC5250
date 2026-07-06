@@ -9,6 +9,22 @@ screen and drive the keyboard.
 
 ---
 
+## Install & updates
+
+Download **`Setup.exe`** from the [latest release](https://github.com/acartergwb/AC5250/releases/latest)
+and run it **once**. It installs per-user to `%LocalAppData%\AC5250` and creates Start/Desktop
+shortcuts you can pin (taskbar/Start/desktop) — the pinned icon always launches the current
+version.
+
+After that it's self-updating: on each launch the app checks GitHub Releases and, if a newer
+version exists, downloads it (delta) and relaunches into it — no re-download, no re-pin. Powered
+by [Velopack](https://velopack.io/).
+
+Releases are produced by the `Release` workflow when a `v*` tag is pushed (`git tag v2.0.0 && git push origin v2.0.0`).
+(Installers are unsigned, so Windows SmartScreen may warn on first run — *More info → Run anyway*.)
+
+---
+
 ## Solution layout
 
 | Project | Target | Purpose |
