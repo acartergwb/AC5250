@@ -50,6 +50,7 @@ public class MainForm : Form
         _mcpStartup = mcpStartup;
 
         Text = "AC5250";
+        if (LoadAppIcon() is { } appIcon) Icon = appIcon;
         Size = new Size(960, 700);
         MinimumSize = new Size(640, 480);
         StartPosition = FormStartPosition.CenterScreen;
@@ -695,6 +696,19 @@ public class MainForm : Form
             DwmSetWindowAttribute(form.Handle, DWMWA_BORDER_COLOR, ref borderColor, sizeof(int));
         }
         catch { }
+    }
+
+    // The window/taskbar icon, loaded from the embedded multi-size .ico (same art as the .exe
+    // ApplicationIcon) so the title bar and taskbar show the AC5250 logo crisply at any DPI.
+    // Best-effort: a missing/failed resource just leaves the default icon.
+    private static Icon? LoadAppIcon()
+    {
+        try
+        {
+            using var s = typeof(MainForm).Assembly.GetManifestResourceStream("AC5250.ico");
+            return s != null ? new Icon(s) : null;
+        }
+        catch { return null; }
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)

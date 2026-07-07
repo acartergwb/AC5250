@@ -52,7 +52,7 @@ jobs:
         run: vpk download github --repoUrl https://github.com/${{ github.repository }} --token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Pack
-        run: vpk pack -u AC5250 -v ${{ steps.ver.outputs.version }} -p publish -e AC5250.exe --packTitle "AC5250"
+        run: vpk pack -u AC5250 -v ${{ steps.ver.outputs.version }} -p publish -e AC5250.exe --packTitle "AC5250" --icon src/AC5250.App/AC5250.ico
 
       - name: Upload to GitHub Release
         run: >
