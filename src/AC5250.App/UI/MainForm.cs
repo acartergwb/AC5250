@@ -70,6 +70,7 @@ internal class MainForm : Form
         _tabBar.SelectedIndexChanged += OnTabChanged;
         _tabBar.TabCloseClicked += OnTabClose;
         _tabBar.NewTabClicked += (_, _) => OpenHomeTab();
+        _tabBar.TabDetached += OnTabDetached;
 
         // Terminal panel
         _terminalPanel = new Panel
@@ -515,6 +516,14 @@ internal class MainForm : Form
     private void OnTabClose(object? sender, int index)
     {
         if (_tabBar.GetTabTag(index) is TabContext ctx) CloseTab(ctx);
+    }
+
+    // A tab dragged out of the bar: move it (session + live control) into a fresh window at
+    // the drop point. The session stays in the shared SessionManager, so MCP keeps driving it.
+    private void OnTabDetached(int index, Point screenLocation)
+    {
+        if (_tabBar.GetTabTag(index) is TabContext ctx)
+            _shell.OpenWindowWithTab(DetachTab(ctx), screenLocation);
     }
 
     /// <summary>Fully close a tab: tear down its session (if any) and remove the tab.</summary>

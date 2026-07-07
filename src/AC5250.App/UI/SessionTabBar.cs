@@ -51,6 +51,10 @@ public class SessionTabBar : Control
     /// <summary>Raised when the "+" new-tab button is clicked.</summary>
     public event EventHandler? NewTabClicked;
 
+    /// <summary>Raised when a tab is dragged out of the bar (to tear it into a new window):
+    /// (tab index, screen location of the drop).</summary>
+    public event Action<int, Point>? TabDetached;
+
     public SessionTabBar()
     {
         SetStyle(
@@ -332,6 +336,25 @@ public class SessionTabBar : Control
     {
         base.OnMouseUp(e);
         if (e.Button != MouseButtons.Left) { ResetPress(); return; }
+
+        // Drag ended away from the strip (off the window, or dragged well below it) with more
+        // than one tab open → tear this tab out into a new window at the drop point.
+        if (_dragging && _pressIndex >= 0 && _tabs.Count > 1)
+        {
+            var screenPt = PointToScreen(e.Location);
+            var form = FindForm();
+            bool droppedOffWindow = form != null && !form.Bounds.Contains(screenPt);
+            bool draggedBelowStrip = e.Y > Height + 60;
+            if (droppedOffWindow || draggedBelowStrip)
+            {
+                int idx = _pressIndex;
+                ResetPress();
+                Cursor = Cursors.Default;
+                TabDetached?.Invoke(idx, screenPt);
+                Invalidate();
+                return;
+            }
+        }
 
         // Fire + / close only on a clean click (no drag happened). Selection already occurred
         // on press. A reorder drag is finalized live, so nothing else to do here.
