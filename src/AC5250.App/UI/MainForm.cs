@@ -715,6 +715,8 @@ public class MainForm : Form
     {
         if (_mcpHost != null)
         {
+            // DisposeAsync caps the host's graceful shutdown short (see McpHost) and uses
+            // ConfigureAwait(false), so this Wait returns promptly and can't deadlock.
             try { _mcpHost.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(3)); } catch { /* shutting down */ }
             _mcpHost = null;
         }
