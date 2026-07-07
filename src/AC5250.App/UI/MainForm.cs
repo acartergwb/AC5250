@@ -6,7 +6,7 @@ using AC5250.Session;
 
 namespace AC5250.UI;
 
-public class MainForm : Form
+internal class MainForm : Form
 {
     [DllImport("dwmapi.dll", PreserveSig = true)]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
@@ -15,7 +15,8 @@ public class MainForm : Form
     private const int DWMWA_CAPTION_COLOR = 35;
     private const int DWMWA_BORDER_COLOR = 34;
 
-    private readonly SessionManager _sessionManager = new();
+    private readonly AppShell _shell;
+    private readonly SessionManager _sessionManager;
     private readonly SessionTabBar _tabBar;
     private readonly Panel _terminalPanel;
     private readonly MenuStrip _menu;
@@ -32,22 +33,22 @@ public class MainForm : Form
     private ToolStripMenuItem? _startMcpItem;
     private ToolStripMenuItem? _stopMcpItem;
 
-    // MCP in-process host (started on demand via the Tools menu, or at launch with --mcp).
-    private const int McpPort = 8250;
-    private McpHost? _mcpHost;
-    private SynchronizationContext? _uiContext;
+    // The MCP host, SessionManager, and settings live in the shared AppShell so an MCP client
+    // drives sessions across every window. This form is one view onto that shared state.
     private readonly McpStartupOptions? _mcpStartup;
-    private int EffectivePort => _mcpStartup?.Port ?? McpPort;
 
     private bool _uppercaseInput = true;
     private ToolStripMenuItem? _uppercaseMenuItem;
 
-    private readonly AppSettings _settings = AppSettingsStore.Load();
+    private readonly AppSettings _settings;
     private ToolStripMenuItem? _mcpStartupMenuItem;
 
-    public MainForm(McpStartupOptions? mcpStartup = null)
+    public MainForm(AppShell shell)
     {
-        _mcpStartup = mcpStartup;
+        _shell = shell;
+        _sessionManager = shell.Sessions;
+        _settings = shell.Settings;
+        _mcpStartup = shell.McpStartup;
 
         Text = "AC5250";
         if (LoadAppIcon() is { } appIcon) Icon = appIcon;
@@ -83,17 +84,15 @@ public class MainForm : Form
         Controls.Add(_tabBar);
         Controls.Add(_menu);
 
-        // Wire session manager events. SessionAdded also fires for sessions created by the
-        // MCP host (Claude), so the UI must build a tab/control for those too.
-        _sessionManager.SessionAdded += OnSessionAdded;
-        _sessionManager.SessionRemoved += OnSessionRemoved;
+        // SessionManager events are handled centrally by the AppShell, which routes each
+        // session to the owning window (this form exposes PlaceSessionTab/Handle* for it).
 
         KeyPreview = true;
     }
 
     /// <summary>Open a new Home tab (the connection chooser). Used by "+", Session ▸ New
     /// Session, and whenever the window would otherwise have no tabs.</summary>
-    private void OpenHomeTab()
+    internal void OpenHomeTab()
     {
         var welcome = new WelcomePanel { Dock = DockStyle.Fill, Visible = false };
         var ctx = new TabContext { Content = welcome };
@@ -136,6 +135,7 @@ public class MainForm : Form
 
         var sessionMenu = CreateMenuItem("&Session");
         sessionMenu.DropDownItems.Add(CreateMenuItem("&New Session", Keys.Control | Keys.T, (_, _) => OpenHomeTab()));
+        sessionMenu.DropDownItems.Add(CreateMenuItem("New &Window", Keys.Control | Keys.N, (_, _) => _shell.OpenWindow()));
         sessionMenu.DropDownItems.Add(CreateMenuItem("&Close Session", Keys.Control | Keys.W, OnCloseSession));
         sessionMenu.DropDownItems.Add(new ToolStripSeparator());
         sessionMenu.DropDownItems.Add(CreateMenuItem("Sign &On (saved credentials)", onClick: OnSignOn));
@@ -206,8 +206,6 @@ public class MainForm : Form
     /// (a Home page, or a previous disconnected session).</summary>
     private async void StartSessionInTab(TabContext ctx, ConnectionSettings settings)
     {
-        _uiContext ??= SynchronizationContext.Current;
-
         // If the tab already holds a (disconnected) session, tear it down first — but null the
         // ref so OnSessionRemoved doesn't delete the tab; we're reusing it.
         if (ctx.Session is { } dead)
@@ -216,8 +214,9 @@ public class MainForm : Form
             _sessionManager.CloseSession(dead);
         }
 
-        _pendingTab = ctx;   // OnSessionAdded places the new terminal control into this tab
-        var session = _sessionManager.CreateSession(settings, _uiContext);
+        _pendingTab = ctx;                 // PlaceSessionTab puts the new terminal into this tab
+        _shell.SetPendingWindow(this);     // and this window owns the session
+        var session = _sessionManager.CreateSession(settings, _shell.UiContext);
         session.UppercaseInput = _uppercaseInput;
 
         try { await session.ConnectAsync(); }
@@ -237,63 +236,29 @@ public class MainForm : Form
         if (_activeTab is { } ctx) CloseTab(ctx);
     }
 
-    protected override void OnLoad(EventArgs e)
-    {
-        base.OnLoad(e);
-        // Capture the WinForms synchronization context; sessions and the MCP host
-        // use it to marshal host-driven parsing and MCP calls onto this thread.
-        _uiContext = SynchronizationContext.Current;
-
-        // Start on the connection chooser.
-        OpenHomeTab();
-
-        // Start the MCP server automatically unless the user turned it off, so an MCP
-        // client (Claude) can connect without any manual step. --mcp forces it on too.
-        if (_mcpStartup?.AutoStart == true || _settings.StartMcpOnStartup)
-            _ = StartMcpAsync();
-    }
+    // The AppShell opens the initial tab after Show() (a Home tab for a fresh window, or an
+    // adopted tab for a dragged-out session) and owns MCP auto-start, so OnLoad is a no-op.
 
     private async void OnStartMcp(object? sender, EventArgs e)
     {
-        if (_mcpHost != null) { OnMcpInfo(sender, e); return; }
+        if (_shell.McpRunning) { OnMcpInfo(sender, e); return; }
 
-        if (await StartMcpAsync() && _mcpHost != null)
+        if (await _shell.StartMcpAsync() && _shell.McpHost is { } host)
         {
-            using var dlg = new McpInfoDialog(_mcpHost);
+            using var dlg = new McpInfoDialog(host);
             dlg.ShowDialog(this);
-        }
-    }
-
-    private async Task<bool> StartMcpAsync()
-    {
-        _uiContext ??= SynchronizationContext.Current;
-        try
-        {
-            var host = new McpHost(_sessionManager, this, _uiContext!, EffectivePort);
-            await host.StartAsync();
-            _mcpHost = host;
-            return true;
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(
-                $"Could not start the MCP server on 127.0.0.1:{EffectivePort}.\n\n{ex.Message}",
-                "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return false;
         }
     }
 
     private async void OnStopMcp(object? sender, EventArgs e)
     {
-        if (_mcpHost == null)
+        if (!_shell.McpRunning)
         {
             MessageBox.Show("MCP server is not running.", "AC5250",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
-        var host = _mcpHost;
-        _mcpHost = null;
-        await host.DisposeAsync();
+        await _shell.StopMcpAsync();
         MessageBox.Show("MCP server stopped.", "AC5250",
             MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
@@ -381,19 +346,19 @@ public class MainForm : Form
         AppSettingsStore.Save(_settings);
 
         // Convenience: enabling it starts the server now if it isn't already running.
-        if (_settings.StartMcpOnStartup && _mcpHost == null)
-            _ = StartMcpAsync();
+        if (_settings.StartMcpOnStartup && !_shell.McpRunning)
+            _ = _shell.StartMcpAsync();
     }
 
     private void OnMcpInfo(object? sender, EventArgs e)
     {
-        if (_mcpHost == null)
+        if (_shell.McpHost is not { } host)
         {
             MessageBox.Show("MCP server is not running. Use Tools → Start MCP Server.",
                 "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
-        using var dlg = new McpInfoDialog(_mcpHost);
+        using var dlg = new McpInfoDialog(host);
         dlg.ShowDialog(this);
     }
 
@@ -435,7 +400,9 @@ public class MainForm : Form
         dlg.ShowDialog(this);
     }
 
-    private void OnSessionAdded(TerminalSession session)
+    /// <summary>Build a terminal control + tab for a newly-created session in this window.
+    /// Called by the AppShell, which routes each new session to its owning window.</summary>
+    internal void PlaceSessionTab(TerminalSession session)
     {
         var control = BuildTerminalControl(session);
 
@@ -459,21 +426,8 @@ public class MainForm : Form
             _tabBar.AddTab(session.Title, ctx);   // selects the tab -> OnTabChanged -> ActivateTab
         }
 
-        session.ConnectionClosed += reason =>
-        {
-            if (InvokeRequired) BeginInvoke(() => OnSessionDisconnected(session, reason));
-            else OnSessionDisconnected(session, reason);
-        };
-
-        session.StatusMessage += msg =>
-        {
-            if (InvokeRequired) BeginInvoke(() => UpdateStatus(session, msg));
-            else UpdateStatus(session, msg);
-        };
-
-        if (!string.IsNullOrEmpty(_mcpStartup?.LogFile))
-            session.DebugLogged += AppendLog;
-
+        // ConnectionClosed / StatusMessage / DebugLogged are subscribed once by the AppShell
+        // and routed to whichever window owns the tab, so moving a tab needs no rewiring.
         ActivateTab(ctx);
     }
 
@@ -514,22 +468,13 @@ public class MainForm : Form
         _terminalPanel.Controls.Add(newContent);
     }
 
-    private readonly object _logLock = new();
-
-    // Append host-side trace lines to the --logfile. Lines for records we SEND are
-    // skipped so the operator's keystrokes (including passwords) are never written.
-    private void AppendLog(string line)
-    {
-        var path = _mcpStartup?.LogFile;
-        if (string.IsNullOrEmpty(path)) return;
-        if (line.Contains("SEND record")) return;
-        try { lock (_logLock) System.IO.File.AppendAllText(path, line + Environment.NewLine); }
-        catch { /* diagnostics only */ }
-    }
+    /// <summary>True when this window currently shows a tab for <paramref name="session"/>.
+    /// The AppShell uses it to route a session's events to the window that owns its tab.</summary>
+    internal bool OwnsSession(TerminalSession session) => FindContextBySession(session) != null;
 
     // Fires only for teardown we didn't start from the UI (e.g. the MCP `disconnect` tool).
     // UI-initiated closes null ctx.Session first, so this finds nothing and no-ops then.
-    private void OnSessionRemoved(TerminalSession session)
+    internal void HandleRemoved(TerminalSession session)
     {
         var ctx = FindContextBySession(session);
         if (ctx == null) return;
@@ -538,7 +483,7 @@ public class MainForm : Form
     }
 
     // Socket dropped (host, error, or user Disconnect): keep the tab as [Closed] and toast.
-    private void OnSessionDisconnected(TerminalSession session, string reason)
+    internal void HandleDisconnected(TerminalSession session, string reason)
     {
         var ctx = FindContextBySession(session);
         if (ctx == null) return;
@@ -552,7 +497,7 @@ public class MainForm : Form
         ShowDisconnectToast(session.Title, reason);
     }
 
-    private void UpdateStatus(TerminalSession session, string msg)
+    internal void HandleStatus(TerminalSession session, string msg)
     {
         if (FindContextBySession(session)?.Content is TerminalControl tc)
         {
@@ -598,6 +543,28 @@ public class MainForm : Form
         if (_tabs.Count == 0) OpenHomeTab();      // never leave the window tab-less
     }
 
+    /// <summary>Remove a tab from THIS window without tearing down its session or content —
+    /// used to hand it to another window. The caller owns the returned context afterwards.</summary>
+    internal TabContext DetachTab(TabContext ctx)
+    {
+        int idx = _tabBar.FindTabByTag(ctx);
+        _terminalPanel.Controls.Remove(ctx.Content);   // reparent out; keep control + buffer alive
+        _tabs.Remove(ctx);
+        if (idx >= 0) _tabBar.RemoveTabAt(idx);
+        if (ReferenceEquals(_activeTab, ctx)) _activeTab = null;
+        if (_tabs.Count == 0) OpenHomeTab();            // never leave the window tab-less
+        return ctx;
+    }
+
+    /// <summary>Take a tab detached from another window into this one and select it.</summary>
+    internal void AdoptTab(TabContext ctx)
+    {
+        _tabs.Add(ctx);
+        _terminalPanel.Controls.Add(ctx.Content);
+        string title = ctx.Session is { } s ? s.Title : "Home";
+        _tabBar.AddTab(title, ctx);   // selects -> OnTabChanged -> ActivateTab
+    }
+
     private void ActivateTab(TabContext ctx)
     {
         foreach (var t in _tabs) t.Content.Visible = false;
@@ -624,8 +591,8 @@ public class MainForm : Form
 
     private void UpdateToolsMenuState()
     {
-        if (_startMcpItem != null) _startMcpItem.Enabled = _mcpHost == null;
-        if (_stopMcpItem != null) _stopMcpItem.Enabled = _mcpHost != null;
+        if (_startMcpItem != null) _startMcpItem.Enabled = !_shell.McpRunning;
+        if (_stopMcpItem != null) _stopMcpItem.Enabled = _shell.McpRunning;
     }
 
     private void OnManageConnections(object? sender, EventArgs e)
@@ -713,25 +680,25 @@ public class MainForm : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        // Don't block the app's close on MCP host shutdown. When an MCP client is connected,
-        // the host's graceful stop waits on the client's long-lived SSE session and ignores the
-        // shutdown timeout (~3s). We're exiting anyway, so tear the host down best-effort on a
-        // background thread and let process exit reclaim the loopback socket — verified that an
-        // un-stopped Kestrel host does not keep the process alive. Closing is now instant.
-        if (_mcpHost != null)
-        {
-            var host = _mcpHost;
-            _mcpHost = null;
-            _ = Task.Run(async () => { try { await host.DisposeAsync(); } catch { /* exiting */ } });
-        }
-        _sessionManager.CloseAll();
         base.OnFormClosing(e);
+        // Close only THIS window's sessions (a shared SessionManager may hold others shown in
+        // other windows). Null ctx.Session first so HandleRemoved doesn't churn the closing
+        // tab bar. The AppShell tears down the MCP host and remaining state when the LAST
+        // window closes (see AppShell.OnWindowClosed).
+        foreach (var ctx in _tabs.ToArray())
+        {
+            if (ctx.Session is { } s)
+            {
+                ctx.Session = null;
+                _sessionManager.CloseSession(s);
+            }
+        }
     }
 
     /// <summary>What a single tab is showing. A tab holds a content control that is either a
     /// <see cref="WelcomePanel"/> (Home — no session yet) or a <see cref="TerminalControl"/>
     /// bound to <see cref="Session"/>. IsHome ⇔ Session is null.</summary>
-    private sealed class TabContext
+    internal sealed class TabContext
     {
         public Control Content = null!;
         public TerminalSession? Session;

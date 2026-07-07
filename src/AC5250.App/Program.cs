@@ -23,7 +23,10 @@ static class Program
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
-        Application.Run(new MainForm(McpStartupOptions.Parse(args)));
+
+        // Run an app context (not a single form) so the app lives until the LAST window
+        // closes. The shell owns the shared SessionManager + MCP host across all windows.
+        Application.Run(new AppShell(McpStartupOptions.Parse(args)));
     }
 
     private static void UpdateOnLaunch()
