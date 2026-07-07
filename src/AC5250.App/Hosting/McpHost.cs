@@ -83,8 +83,15 @@ internal sealed class McpHost : IAsyncDisposable
     {
         if (_app != null)
         {
-            try { await _app.StopAsync(TimeSpan.FromSeconds(2)); } catch { /* best effort */ }
-            await _app.DisposeAsync();
+            // Stop quickly. On shutdown we don't want Kestrel's graceful drain — it would wait
+            // the full timeout for the MCP client's long-lived SSE connection to close — so give
+            // it only a brief grace period, then abort. ConfigureAwait(false) keeps these
+            // continuations OFF the UI thread: OnFormClosing blocks on .Wait(), and without this
+            // the awaited continuation (posted back to the WinForms context) would deadlock
+            // against that Wait until it timed out — which was the slow app close.
+            try { await _app.StopAsync(TimeSpan.FromMilliseconds(250)).ConfigureAwait(false); }
+            catch { /* best effort */ }
+            await _app.DisposeAsync().ConfigureAwait(false);
             _app = null;
         }
     }
