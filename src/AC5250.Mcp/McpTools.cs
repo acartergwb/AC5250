@@ -66,12 +66,13 @@ public static class McpTools
         => controller.SetField(sessionId, fieldIndex, value, clearFirst);
 
     [McpServerTool(Name = "signon")]
-    [Description("Sign on to the current session using the credentials the user saved on this machine (Windows Credential Manager) for the session's host. Fills the user and password fields locally and presses Enter. You do NOT provide the password — it is read from the OS vault and never exposed. Use this when the screen is an IBM i sign-on prompt. Omit sessionId for the active session.")]
+    [Description("Sign on to the current session using credentials the user saved on this machine (Windows Credential Manager) for the session's host. Fills the user and password fields locally and presses Enter. You do NOT provide the password — it is read from the OS vault and never exposed. A host can have several saved logins under short labels; omit credentialLabel to use the host's default (or its only login), or pass a label to pick a specific one. If the label is missing, the error lists the labels that exist. Use this when the screen is an IBM i sign-on prompt. Omit sessionId for the active session.")]
     public static Task<ScreenSnapshot> SignOn(
         EmulatorController controller,
+        [Description("Credential label to use (e.g. 'ADMIN'); omit for the host's default login.")] string? credentialLabel = null,
         [Description("Session id to sign on; omit for the active session.")] string? sessionId = null,
         CancellationToken ct = default)
-        => controller.SignOnAsync(sessionId, 0, ct);
+        => controller.SignOnAsync(sessionId, credentialLabel, 0, ct);
 
     [McpServerTool(Name = "press_key")]
     [Description("Press a 5250 key. AID keys submit the screen to the host: Enter, F1-F24, Clear, Attn, SysReq, Help, Print, PageUp, PageDown. Navigation/editing keys act client-side: Tab, BackTab, Home, End, Up, Down, Left, Right, Backspace, Delete, Insert, FieldExit, Reset, EraseInput. For AID keys the tool BLOCKS until the host finishes working and re-invites input (the keyboard stays locked, 'X SYSTEM', while it works) — so the returned screen is the host's real response, not an intermediate paint. If the wait times out, the returned screen may still have keyboardInhibited=true; call wait_for_screen or press_key again. Omit sessionId for the active session.")]

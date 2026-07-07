@@ -322,11 +322,27 @@ public class MainForm : Form
             MessageBox.Show("No active session.", "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
-        var creds = AC5250.Security.CredentialStore.Get(s.Settings.HostName);
-        if (creds is null)
+        string host = s.Settings.HostName;
+        var labels = AC5250.Security.CredentialStore.Labels(host);
+        if (labels.Count == 0)
         {
             MessageBox.Show(
-                $"No saved credentials for host '{s.Settings.HostName}'.\nAdd them via Session > Manage Saved Credentials.",
+                $"No saved credentials for host '{host}'.\nAdd them via Session > Manage Saved Credentials.",
+                "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        // With more than one login for the host, ask which; otherwise use the default/only one.
+        string? label = null;
+        if (labels.Count > 1)
+        {
+            label = CredentialPicker.Choose(this, host, labels);
+            if (label == null) return; // cancelled
+        }
+        var creds = AC5250.Security.CredentialStore.Get(host, label);
+        if (creds is null)
+        {
+            MessageBox.Show($"Could not read the saved credential for '{host}'.",
                 "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
