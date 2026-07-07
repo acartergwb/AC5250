@@ -41,14 +41,30 @@ public static class DataStreamWriter
             data.Add((byte)(field.Row + 1));
             data.Add((byte)(field.Col + 1));
 
-            // Field data in EBCDIC
+            // Field data in EBCDIC (GetData already trims trailing blanks). For alpha input,
+            // also strip LEADING blanks so a value typed mid-field is left-adjusted (ACS-style
+            // "smart" entry) — otherwise S2K receives e.g. "   1023" instead of "1023". Numeric
+            // fields are right-justified by the host, so their content is left untouched.
             var fieldData = field.GetData();
+            if (!IsNumericField(field.Attribute.Format))
+            {
+                // Strip leading blanks — both EBCDIC space (0x40, typed) and null (0x00, the
+                // untouched cells left when the cursor is click-positioned to the right). Both
+                // mean "empty" (GetData trims the same pair from the tail).
+                int start = 0;
+                while (start < fieldData.Length && (fieldData[start] == 0x40 || fieldData[start] == 0x00)) start++;
+                if (start > 0) fieldData = fieldData[start..];
+            }
             data.AddRange(fieldData);
         }
 
         FillRecordLength(data);
         return data.ToArray();
     }
+
+    private static bool IsNumericField(FieldFormat f) =>
+        f is FieldFormat.NumericOnly or FieldFormat.NumericShift
+          or FieldFormat.DigitsOnly or FieldFormat.SignedNumeric;
 
     /// <summary>
     /// Build the response to a Save Screen request (opcode 0x04): a data stream that

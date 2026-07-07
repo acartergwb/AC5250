@@ -240,12 +240,22 @@ public class TerminalSession : IDisposable
     {
         if (Screen.InputInhibited) return;
 
-        MoveCursorLeft();
-        var field = Screen.GetFieldForCursor();
+        // Backspace deletes the cell to the LEFT of the cursor and moves there. Resolve the
+        // field that owns THAT cell — not the field under the cursor: when a field is full the
+        // cursor sits just past its right edge, so the field to edit is the one to the left.
+        // If the left cell isn't an editable data cell (a protected/constant cell, or a field's
+        // own leading attribute at its start), it's a no-op — we never back into non-writable
+        // space, and a full field can still be corrected from just past its right edge.
+        int cur = Screen.CursorRow * Screen.Cols + Screen.CursorCol;
+        if (cur <= 0) return;
+        int leftRow = (cur - 1) / Screen.Cols;
+        int leftCol = (cur - 1) % Screen.Cols;
+
+        var field = Screen.GetFieldAt(leftRow, leftCol);
         if (field == null || field.Attribute.IsBypass) return;
 
-        int idx = field.GetIndexForPosition(Screen.CursorRow, Screen.CursorCol, Screen.Cols);
-        field.DeleteCharAt(idx);
+        Screen.MoveCursorTo(leftRow, leftCol);
+        field.DeleteCharAt(field.GetIndexForPosition(leftRow, leftCol, Screen.Cols));
         Screen.SyncFieldToBuffer(field);
         Screen.NotifyScreenChanged();
     }
