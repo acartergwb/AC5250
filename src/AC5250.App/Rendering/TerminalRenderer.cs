@@ -50,9 +50,10 @@ public static class TerminalRenderer
                     // bare attribute cells, not filled blanks) render as invisible gaps.
                     var here = FieldAttribute.DecodeDisplay(a);
 
-                    // A *field* attribute (one that introduces a field) applies only to
-                    // that field, so it must NOT change the running character attribute.
-                    // An *inline* character attribute persists until the next attribute byte.
+                    // Detect whether this attribute byte introduces a field (the next cell is a
+                    // field start). A field's leading attribute cell is not painted here — its
+                    // colour belongs to the field's own cells, not this gap cell — and it drives
+                    // the running attribute differently from an inline attribute (see below).
                     int npos = row * cols + col + 1;
                     bool isFieldMarker = npos < rows * cols && buffer.IsFieldStart(npos / cols, npos % cols);
 
@@ -61,7 +62,14 @@ public static class TerminalRenderer
                     // leading attribute belongs to the field's own cells, not this gap
                     // cell; painting it would add a stray underline/fill one column left
                     // of every input field (making fields look shifted a space right).
-                    if (!isFieldMarker && !here.NonDisplay)
+                    // Don't paint an attribute cell in the last column. By 5250 convention a
+                    // last-column attribute is the *leading* attribute for the NEXT line's
+                    // wrapped content (S2K parks a label/field's attribute in col 80 so it
+                    // doesn't consume a visible column on the content line). Painting it drew a
+                    // stray reverse block / underline at the right edge that ACS doesn't show.
+                    // The running attribute is still updated below so the wrapped text is
+                    // coloured correctly.
+                    if (!isFieldMarker && !here.NonDisplay && col < cols - 1)
                     {
                         if (here.Reverse)
                         {
@@ -80,8 +88,18 @@ public static class TerminalRenderer
                         }
                     }
 
-                    if (!isFieldMarker)
-                        cur = here;
+                    // Running-attribute update. An inline (non-field) attribute persists until
+                    // the next attribute byte. A field's leading attribute is different: its own
+                    // cells carry the field attribute (handled via eff below), but the positions
+                    // AFTER the field revert to normal — matching ACS. So at a field marker we
+                    // reset the running attribute to normal rather than letting either the
+                    // preceding attribute (e.g. a reverse-video "Qty." label wrapping in from the
+                    // prior row) OR the field's own attribute bleed into the dead space past the
+                    // field. The former painted a stray reverse block; the latter drew a stray
+                    // underline to the row's edge.
+                    cur = isFieldMarker
+                        ? new FieldAttribute.DisplayAttr(Field5250Color.Green, false, false, false, false, false)
+                        : here;
                     continue;
                 }
 
