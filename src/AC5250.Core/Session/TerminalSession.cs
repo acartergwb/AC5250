@@ -240,19 +240,22 @@ public class TerminalSession : IDisposable
     {
         if (Screen.InputInhibited) return;
 
-        // Backspace deletes the character to the LEFT and moves the cursor left, but must
-        // stay inside the current input field — it must never slide into a protected/constant
-        // cell (ACS won't let you edit those). Previously it moved the cursor first and only
-        // then checked the field, so at a field's left edge the cursor backed into protected
-        // space. Now: at the field's first position (or outside any editable field) it's a no-op.
-        var field = Screen.GetFieldForCursor();
+        // Backspace deletes the cell to the LEFT of the cursor and moves there. Resolve the
+        // field that owns THAT cell — not the field under the cursor: when a field is full the
+        // cursor sits just past its right edge, so the field to edit is the one to the left.
+        // If the left cell isn't an editable data cell (a protected/constant cell, or a field's
+        // own leading attribute at its start), it's a no-op — we never back into non-writable
+        // space, and a full field can still be corrected from just past its right edge.
+        int cur = Screen.CursorRow * Screen.Cols + Screen.CursorCol;
+        if (cur <= 0) return;
+        int leftRow = (cur - 1) / Screen.Cols;
+        int leftCol = (cur - 1) % Screen.Cols;
+
+        var field = Screen.GetFieldAt(leftRow, leftCol);
         if (field == null || field.Attribute.IsBypass) return;
 
-        int idx = field.GetIndexForPosition(Screen.CursorRow, Screen.CursorCol, Screen.Cols);
-        if (idx <= 0) return; // at the field start — don't back into the protected area
-
-        Screen.MoveCursorBack();
-        field.DeleteCharAt(idx - 1);
+        Screen.MoveCursorTo(leftRow, leftCol);
+        field.DeleteCharAt(field.GetIndexForPosition(leftRow, leftCol, Screen.Cols));
         Screen.SyncFieldToBuffer(field);
         Screen.NotifyScreenChanged();
     }
