@@ -12,12 +12,23 @@ public class SessionTabBar : Control
     private int _hoverIndex = -1;
     private int _hoverCloseIndex = -1;
     private bool _hoverNewTab;
+
+    // Drag-to-reorder state. A left press on a tab is a *candidate* drag; it becomes a real
+    // reorder once the pointer moves past DragThreshold. + and close are tracked on press so
+    // they only fire on a clean click (not at the end of a drag).
+    private int _pressIndex = -1;
+    private int _pressX;
+    private bool _dragging;
+    private bool _pressedNewTab;
+    private int _pressedCloseIndex = -1;
+
     private const int TabHeight = 34;
     private const int TabPadding = 16;
     private const int CloseButtonSize = 16;
     private const int MaxTabWidth = 220;
     private const int MinTabWidth = 100;
     private const int NewTabButtonSize = 24;   // the "+" button glyph box
+    private const int DragThreshold = 5;        // px a press must move before it's a reorder drag
 
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public int SelectedIndex
@@ -233,9 +244,65 @@ public class SessionTabBar : Control
         g.FillPath(brush, path);
     }
 
+    /// <summary>Which tab index the x-coordinate falls over (tabs are equal width), clamped.</summary>
+    private int TabIndexAtX(int x)
+    {
+        if (_tabs.Count == 0) return -1;
+        int idx = (x - 4) / GetTabWidth();
+        return Math.Clamp(idx, 0, _tabs.Count - 1);
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        ResetPress();
+        if (e.Button != MouseButtons.Left) return;
+
+        // "+" takes priority — it can overlap the trailing edge of the last tab.
+        if (GetNewTabRect().Contains(e.Location)) { _pressedNewTab = true; return; }
+
+        for (int i = 0; i < _tabs.Count; i++)
+        {
+            if ((i == _selectedIndex || i == _hoverIndex) && GetCloseRect(i).Contains(e.Location))
+            {
+                _pressedCloseIndex = i;
+                return;
+            }
+            if (GetTabRect(i).Contains(e.Location))
+            {
+                SelectedIndex = i;      // select on press so click-to-select still works
+                _pressIndex = i;        // and mark it as a candidate for a reorder drag
+                _pressX = e.X;
+                return;
+            }
+        }
+    }
+
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
+
+        // A held press on a tab that moves far enough becomes a live reorder drag.
+        if (_pressIndex >= 0 && (e.Button & MouseButtons.Left) != 0)
+        {
+            if (!_dragging && Math.Abs(e.X - _pressX) > DragThreshold) _dragging = true;
+            if (_dragging)
+            {
+                int target = TabIndexAtX(e.X);
+                if (target >= 0 && target != _pressIndex)
+                {
+                    var item = _tabs[_pressIndex];
+                    _tabs.RemoveAt(_pressIndex);
+                    _tabs.Insert(target, item);
+                    _selectedIndex = target;   // dragged tab stays selected (set field: no re-activate)
+                    _pressIndex = target;
+                    Invalidate();
+                }
+                Cursor = Cursors.SizeAll;
+                return;   // suppress hover changes while dragging
+            }
+        }
+
         int newHover = -1;
         int newCloseHover = -1;
         bool newTabHover = GetNewTabRect().Contains(e.Location);
@@ -261,40 +328,44 @@ public class SessionTabBar : Control
         }
     }
 
-    protected override void OnMouseLeave(EventArgs e)
+    protected override void OnMouseUp(MouseEventArgs e)
     {
-        base.OnMouseLeave(e);
-        _hoverIndex = -1;
-        _hoverCloseIndex = -1;
-        _hoverNewTab = false;
+        base.OnMouseUp(e);
+        if (e.Button != MouseButtons.Left) { ResetPress(); return; }
+
+        // Fire + / close only on a clean click (no drag happened). Selection already occurred
+        // on press. A reorder drag is finalized live, so nothing else to do here.
+        if (!_dragging)
+        {
+            if (_pressedNewTab && GetNewTabRect().Contains(e.Location))
+                NewTabClicked?.Invoke(this, EventArgs.Empty);
+            else if (_pressedCloseIndex >= 0 && GetCloseRect(_pressedCloseIndex).Contains(e.Location))
+                TabCloseClicked?.Invoke(this, _pressedCloseIndex);
+        }
+
+        ResetPress();
         Cursor = Cursors.Default;
         Invalidate();
     }
 
-    protected override void OnMouseClick(MouseEventArgs e)
+    private void ResetPress()
     {
-        base.OnMouseClick(e);
+        _pressIndex = -1;
+        _dragging = false;
+        _pressedNewTab = false;
+        _pressedCloseIndex = -1;
+    }
 
-        // "+" takes priority — it can overlap the trailing edge of the last tab.
-        if (GetNewTabRect().Contains(e.Location))
-        {
-            NewTabClicked?.Invoke(this, EventArgs.Empty);
-            return;
-        }
-
-        for (int i = 0; i < _tabs.Count; i++)
-        {
-            if (GetCloseRect(i).Contains(e.Location))
-            {
-                TabCloseClicked?.Invoke(this, i);
-                return;
-            }
-            if (GetTabRect(i).Contains(e.Location))
-            {
-                SelectedIndex = i;
-                return;
-            }
-        }
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        base.OnMouseLeave(e);
+        // Don't clear an active drag here — the control keeps mouse capture during a drag, so
+        // the reorder continues even if the pointer briefly leaves the bar.
+        _hoverIndex = -1;
+        _hoverCloseIndex = -1;
+        _hoverNewTab = false;
+        if (_pressIndex < 0) Cursor = Cursors.Default;
+        Invalidate();
     }
 
     private class TabItem
