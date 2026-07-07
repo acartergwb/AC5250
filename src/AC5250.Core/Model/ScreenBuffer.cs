@@ -36,6 +36,11 @@ public class ScreenBuffer
     public bool MessageWaiting { get; set; }
     public bool SystemAvailable { get; set; } = true;
 
+    // True once the host explicitly positioned the cursor (an Insert-Cursor / Move-Cursor
+    // order) during the current write. The parser resets it per PUT_GET; if it stays false,
+    // the host left the cursor to us and we home it to the field start (ACS behavior).
+    public bool CursorAddressed { get; set; }
+
     public event Action? ScreenChanged;
 
     /// <summary>
@@ -114,15 +119,19 @@ public class ScreenBuffer
 
     public void SetBufferAddress(int row, int col)
     {
-        // 5250 uses 1-based addressing
-        _bufferRow = Math.Max(0, row - 1);
-        _bufferCol = Math.Max(0, col - 1);
+        // 5250 uses 1-based addressing. Clamp to the buffer (both bounds): a host that
+        // addresses beyond the current screen — e.g. a 27x132 layout drawn into a 24x80
+        // buffer — must not push the write position out of range, or a later field/char
+        // write (and field sync) throws and aborts the parse, freezing the keyboard.
+        _bufferRow = Math.Clamp(row - 1, 0, Rows - 1);
+        _bufferCol = Math.Clamp(col - 1, 0, Cols - 1);
     }
 
     public void SetCursorAddress(int row, int col)
     {
         CursorRow = Math.Clamp(row, 0, Rows - 1);
         CursorCol = Math.Clamp(col, 0, Cols - 1);
+        CursorAddressed = true;
     }
 
     public void InsertCursorHere()
@@ -242,24 +251,26 @@ public class ScreenBuffer
         if (targetPos < currentPos)
         {
             // Wrap around
-            while (currentPos < total)
-            {
-                _characters[currentPos] = ch;
-                _attributes[currentPos] = 0;
-                currentPos++;
-            }
+            while (currentPos < total) FillCell(currentPos++, ch);
             currentPos = 0;
         }
 
         while (currentPos < targetPos && currentPos < total)
-        {
-            _characters[currentPos] = ch;
-            _attributes[currentPos] = 0;
-            currentPos++;
-        }
+            FillCell(currentPos++, ch);
 
         _bufferRow = targetRow;
         _bufferCol = targetCol;
+    }
+
+    // Fill one cell during a Repeat-to-Address. Overwriting a field's leading attribute
+    // byte destroys that field (same 5250 rule WriteCharacter follows) — without this, a
+    // host that blanks a region with RA (S2K does this constantly on windowed screens)
+    // leaves the old fields' objects behind, rendering as phantom input underlines.
+    private void FillCell(int pos, byte ch)
+    {
+        InvalidateFieldWithAttrAt(pos);
+        _characters[pos] = ch;
+        _attributes[pos] = 0;
     }
 
     public void EraseToAddress(int row, int col)

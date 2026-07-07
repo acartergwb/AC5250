@@ -48,6 +48,13 @@ internal sealed class McpHost : IAsyncDisposable
         builder.WebHost.UseUrls($"http://127.0.0.1:{Port}");
         builder.Logging.SetMinimumLevel(LogLevel.Warning);
 
+        // Shut down fast. The MCP client holds a long-lived SSE stream that never drains on
+        // its own, so the host's graceful-shutdown wait is pure delay on exit — and it governs
+        // BOTH StopAsync and DisposeAsync's internal stop (the default 30s was what made
+        // closing the app hang ~3s). Cap it hard: 250ms is imperceptible but still lets a
+        // genuinely in-flight request finish before connections are aborted.
+        builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromMilliseconds(250));
+
         builder.Services.AddSingleton(_controller);
         builder.Services
             .AddMcpServer()
@@ -83,8 +90,12 @@ internal sealed class McpHost : IAsyncDisposable
     {
         if (_app != null)
         {
-            try { await _app.StopAsync(TimeSpan.FromSeconds(2)); } catch { /* best effort */ }
-            await _app.DisposeAsync();
+            // StopAsync (and the stop DisposeAsync runs internally) are both bounded by the
+            // 500ms ShutdownTimeout configured in StartAsync, so this returns quickly instead of
+            // waiting on the SSE stream. ConfigureAwait(false) keeps the continuations OFF the UI
+            // thread that OnFormClosing blocks on, so its .Wait() can't deadlock against them.
+            try { await _app.StopAsync().ConfigureAwait(false); } catch { /* best effort */ }
+            await _app.DisposeAsync().ConfigureAwait(false);
             _app = null;
         }
     }

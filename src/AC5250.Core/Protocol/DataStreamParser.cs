@@ -40,19 +40,20 @@ public class DataStreamParser
                 break;
 
             case TelnetConstants.OPCODE_PUT_GET:
-                ParseOutput(record, TelnetConstants.HEADER_LENGTH);
-                // PUT_GET = output + invite: unlock keyboard and position cursor.
-                _screen.InputInhibited = false;
-                // If the host didn't leave the cursor on an enterable field, drop it
-                // onto the first input field so the operator can type without Tab.
-                var cursorField = _screen.GetFieldForCursor();
-                if (cursorField == null || cursorField.Attribute.IsBypass)
+                _screen.CursorAddressed = false; // track whether this write positions the cursor
+                try
                 {
-                    var firstField = _screen.GetNextInputField(0, 0);
-                    if (firstField != null)
-                        _screen.MoveCursorTo(firstField.Row, firstField.Col);
+                    ParseOutput(record, TelnetConstants.HEADER_LENGTH);
                 }
-                _screen.NotifyScreenChanged();
+                finally
+                {
+                    // PUT_GET = output + invite: unlock the keyboard and position the cursor.
+                    // In a finally so it runs even if ParseOutput throws on a malformed screen —
+                    // otherwise the invite is lost and the operator is frozen with no way to type.
+                    _screen.InputInhibited = false;
+                    PositionCursorAfterInvite();
+                    _screen.NotifyScreenChanged();
+                }
                 break;
 
             case TelnetConstants.OPCODE_INVITE:
@@ -168,6 +169,32 @@ public class DataStreamParser
         // field objects so it displays and is transmitted back correctly.
         _screen.SyncBufferToFields();
         _screen.NotifyScreenChanged();
+    }
+
+    /// <summary>
+    /// Decide where the cursor sits after a PUT_GET invite. If the host explicitly positioned
+    /// it (Insert/Move Cursor) and it's on an input field, honor that. If the host gave NO
+    /// cursor order, snap the cursor to the START of the field it's in — so it returns to the
+    /// beginning of the line (ACS behavior); many S2K command screens repaint with only a
+    /// Read-MDT-Fields and no cursor order, otherwise leaving the cursor where the operator
+    /// last typed. If the cursor isn't on an enterable field, fall back to the first input field.
+    /// </summary>
+    private void PositionCursorAfterInvite()
+    {
+        var field = _screen.GetFieldForCursor();
+        bool onInput = field != null && !field.Attribute.IsBypass;
+
+        if (!_screen.CursorAddressed && onInput)
+        {
+            _screen.MoveCursorTo(field!.Row, field.Col); // host left the cursor to us: home to field start
+            return;
+        }
+        if (!onInput)
+        {
+            var firstField = _screen.GetNextInputField(0, 0);
+            if (firstField != null)
+                _screen.MoveCursorTo(firstField.Row, firstField.Col);
+        }
     }
 
     private int ParseWriteToDisplay(byte[] record, int offset)

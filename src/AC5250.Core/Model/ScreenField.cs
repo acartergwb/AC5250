@@ -76,8 +76,11 @@ public class ScreenField
 
     public void SetData(byte[] data, int offset, int length)
     {
+        if (offset < 0 || offset >= data.Length) return;
         int copyLen = Math.Min(length, Length);
-        Array.Copy(data, offset, _data, 0, copyLen);
+        // A field can extend past the bottom-right of the buffer; never read beyond it.
+        copyLen = Math.Min(copyLen, data.Length - offset);
+        if (copyLen > 0) Array.Copy(data, offset, _data, 0, copyLen);
     }
 
     public void ClearData()

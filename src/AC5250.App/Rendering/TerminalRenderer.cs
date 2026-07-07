@@ -42,26 +42,35 @@ public static class TerminalRenderer
                 byte a = buffer.GetAttributeByteAt(row, col);
                 if (a >= 0x20 && a <= 0x3F)
                 {
-                    // The attribute byte occupies a blank cell that is itself displayed
-                    // with the attribute it defines. So a reverse-video attribute (e.g.
-                    // the red-reverse cells that frame a pop-up window) must paint this
-                    // cell as a colored block, and an underline attribute must underline
-                    // it — otherwise the window's left/right border columns (which are
-                    // bare attribute cells, not filled blanks) render as invisible gaps.
+                    // A 5250 attribute byte occupies one screen position, is displayed as a
+                    // blank, and applies to the FOLLOWING positions until the next attribute
+                    // byte (GA21-9247 Functions Reference). So the visible colour of a reverse-
+                    // video region normally lands on the character cells after the attribute,
+                    // not the attribute cell itself. A window's side border is 1 column wide in
+                    // ACS: the host writes it either as [reverse-attr][space][normal-attr] (the
+                    // space carries the colour) or as [reverse-attr][normal-attr] with no space
+                    // (nothing follows to carry it). Painting the attribute cell UNCONDITIONALLY
+                    // made the first form render 2 columns wide (attr cell + space) and, where
+                    // padding attributes doubled up, jagged. Fix: paint the attribute cell only
+                    // when it is the last cell of its reverse run — i.e. the next cell is a
+                    // non-reverse attribute byte, so no following character will carry the
+                    // colour. Then the space form renders 1 column (via the char) and the
+                    // no-space form renders 1 column (via this cell).
                     var here = FieldAttribute.DecodeDisplay(a);
 
-                    // A *field* attribute (one that introduces a field) applies only to
-                    // that field, so it must NOT change the running character attribute.
-                    // An *inline* character attribute persists until the next attribute byte.
+                    // Detect whether this attribute byte introduces a field (the next cell is a
+                    // field start). A field's leading attribute cell is never painted — its
+                    // colour belongs to the field's own cells, not this gap cell — and it drives
+                    // the running attribute differently from an inline attribute (see below).
                     int npos = row * cols + col + 1;
                     bool isFieldMarker = npos < rows * cols && buffer.IsFieldStart(npos / cols, npos % cols);
 
-                    // Paint the attribute cell only for INLINE attributes — a window's
-                    // red-reverse border column shows as a colored block, etc. A field's
-                    // leading attribute belongs to the field's own cells, not this gap
-                    // cell; painting it would add a stray underline/fill one column left
-                    // of every input field (making fields look shifted a space right).
-                    if (!isFieldMarker && !here.NonDisplay)
+                    // Skip the last column too: by 5250 convention a last-column attribute is the
+                    // leading attribute for the NEXT line's wrapped content (S2K parks a label/
+                    // field's attribute in col 80 so it doesn't consume a visible column), so
+                    // painting it drew a stray block at the right edge that ACS doesn't show.
+                    if (!isFieldMarker && !here.NonDisplay && col < cols - 1
+                        && NextIsNonReverseAttribute(buffer, row, col, cols))
                     {
                         if (here.Reverse)
                         {
@@ -75,8 +84,18 @@ public static class TerminalRenderer
                         }
                     }
 
-                    if (!isFieldMarker)
-                        cur = here;
+                    // Running-attribute update. An inline (non-field) attribute persists until
+                    // the next attribute byte. A field's leading attribute is different: its own
+                    // cells carry the field attribute (handled via eff below), but the positions
+                    // AFTER the field revert to normal — matching ACS. So at a field marker we
+                    // reset the running attribute to normal rather than letting either the
+                    // preceding attribute (e.g. a reverse-video "Qty." label wrapping in from the
+                    // prior row) OR the field's own attribute bleed into the dead space past the
+                    // field. The former painted a stray reverse block; the latter drew a stray
+                    // underline to the row's edge.
+                    cur = isFieldMarker
+                        ? new FieldAttribute.DisplayAttr(Field5250Color.Green, false, false, false, false, false)
+                        : here;
                     continue;
                 }
 
@@ -102,20 +121,25 @@ public static class TerminalRenderer
                     g.FillRectangle(rb, rect);
                 }
 
-                if (!eff.NonDisplay)
+                byte eb = field != null
+                    ? field.GetCharAt(field.GetIndexForPosition(row, col, cols))
+                    : buffer.GetCharAt(row, col);
+                char ch = Ebcdic.ToAscii(eb);
+                bool hasGlyph = ch > ' ' && ch <= '~';
+
+                if (!eff.NonDisplay && hasGlyph)
                 {
-                    byte eb = field != null
-                        ? field.GetCharAt(field.GetIndexForPosition(row, col, cols))
-                        : buffer.GetCharAt(row, col);
-                    char ch = Ebcdic.ToAscii(eb);
-                    if (ch > ' ' && ch <= '~')
-                    {
-                        Color textColor = eff.Reverse ? colors.Background : fg;
-                        TextRenderer.DrawText(g, ch.ToString(), font, rect, textColor, Color.Transparent, textFlags);
-                    }
+                    Color textColor = eff.Reverse ? colors.Background : fg;
+                    TextRenderer.DrawText(g, ch.ToString(), font, rect, textColor, Color.Transparent, textFlags);
                 }
 
-                if (eff.Underline)
+                // Underline field cells (so an empty input field still shows its underscore) and
+                // cells that carry a glyph — but NOT empty free-form cells. An underline attribute
+                // bleeds along the running character attribute until the next attribute byte, so
+                // one the host parks at a pop-up's bottom-right corner (e.g. 0x24 at col 24) would
+                // otherwise underline every cleared cell to the right and on every row below it,
+                // painting stray green horizontal lines that ACS does not show.
+                if (eff.Underline && (field != null || hasGlyph))
                 {
                     using var up = new Pen(eff.NonDisplay ? colors.InputUnderline : fg);
                     g.DrawLine(up, x, y + cellHeight - 1, x + cellWidth - 1, y + cellHeight - 1);
@@ -139,6 +163,21 @@ public static class TerminalRenderer
             else
                 g.FillRectangle(cursorBrush, cx, cy + cellHeight - 3, cellWidth, 3);
         }
+    }
+
+    // True when the cell immediately to the right is a non-reverse attribute byte — meaning
+    // this attribute cell is the LAST cell of its reverse run and no following character will
+    // carry the colour, so the attribute cell itself must be painted (a 1-column border with no
+    // trailing space). If the next cell is a character (it will render reverse via the running
+    // attribute) or another reverse attribute (it will paint or defer in turn), this cell is
+    // left blank so the run renders exactly 1 column wide, matching ACS.
+    private static bool NextIsNonReverseAttribute(ScreenBuffer buffer, int row, int col, int cols)
+    {
+        int nextCol = col + 1;
+        if (nextCol >= cols) return false;
+        byte next = buffer.GetAttributeByteAt(row, nextCol);
+        if (next is < 0x20 or > 0x3F) return false; // a character cell — it carries the colour
+        return !FieldAttribute.DecodeDisplay(next).Reverse;
     }
 
     public static void RenderStatusBar(

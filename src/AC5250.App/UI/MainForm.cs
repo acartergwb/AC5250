@@ -50,6 +50,7 @@ public class MainForm : Form
         _mcpStartup = mcpStartup;
 
         Text = "AC5250";
+        if (LoadAppIcon() is { } appIcon) Icon = appIcon;
         Size = new Size(960, 700);
         MinimumSize = new Size(640, 480);
         StartPosition = FormStartPosition.CenterScreen;
@@ -697,12 +698,31 @@ public class MainForm : Form
         catch { }
     }
 
+    // The window/taskbar icon, loaded from the embedded multi-size .ico (same art as the .exe
+    // ApplicationIcon) so the title bar and taskbar show the AC5250 logo crisply at any DPI.
+    // Best-effort: a missing/failed resource just leaves the default icon.
+    private static Icon? LoadAppIcon()
+    {
+        try
+        {
+            using var s = typeof(MainForm).Assembly.GetManifestResourceStream("AC5250.ico");
+            return s != null ? new Icon(s) : null;
+        }
+        catch { return null; }
+    }
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        // Don't block the app's close on MCP host shutdown. When an MCP client is connected,
+        // the host's graceful stop waits on the client's long-lived SSE session and ignores the
+        // shutdown timeout (~3s). We're exiting anyway, so tear the host down best-effort on a
+        // background thread and let process exit reclaim the loopback socket — verified that an
+        // un-stopped Kestrel host does not keep the process alive. Closing is now instant.
         if (_mcpHost != null)
         {
-            try { _mcpHost.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(3)); } catch { /* shutting down */ }
+            var host = _mcpHost;
             _mcpHost = null;
+            _ = Task.Run(async () => { try { await host.DisposeAsync(); } catch { /* exiting */ } });
         }
         _sessionManager.CloseAll();
         base.OnFormClosing(e);
