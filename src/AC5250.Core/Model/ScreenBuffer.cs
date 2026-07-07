@@ -245,24 +245,26 @@ public class ScreenBuffer
         if (targetPos < currentPos)
         {
             // Wrap around
-            while (currentPos < total)
-            {
-                _characters[currentPos] = ch;
-                _attributes[currentPos] = 0;
-                currentPos++;
-            }
+            while (currentPos < total) FillCell(currentPos++, ch);
             currentPos = 0;
         }
 
         while (currentPos < targetPos && currentPos < total)
-        {
-            _characters[currentPos] = ch;
-            _attributes[currentPos] = 0;
-            currentPos++;
-        }
+            FillCell(currentPos++, ch);
 
         _bufferRow = targetRow;
         _bufferCol = targetCol;
+    }
+
+    // Fill one cell during a Repeat-to-Address. Overwriting a field's leading attribute
+    // byte destroys that field (same 5250 rule WriteCharacter follows) — without this, a
+    // host that blanks a region with RA (S2K does this constantly on windowed screens)
+    // leaves the old fields' objects behind, rendering as phantom input underlines.
+    private void FillCell(int pos, byte ch)
+    {
+        InvalidateFieldWithAttrAt(pos);
+        _characters[pos] = ch;
+        _attributes[pos] = 0;
     }
 
     public void EraseToAddress(int row, int col)
