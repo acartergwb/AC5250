@@ -40,19 +40,27 @@ public class DataStreamParser
                 break;
 
             case TelnetConstants.OPCODE_PUT_GET:
-                ParseOutput(record, TelnetConstants.HEADER_LENGTH);
-                // PUT_GET = output + invite: unlock keyboard and position cursor.
-                _screen.InputInhibited = false;
-                // If the host didn't leave the cursor on an enterable field, drop it
-                // onto the first input field so the operator can type without Tab.
-                var cursorField = _screen.GetFieldForCursor();
-                if (cursorField == null || cursorField.Attribute.IsBypass)
+                try
                 {
-                    var firstField = _screen.GetNextInputField(0, 0);
-                    if (firstField != null)
-                        _screen.MoveCursorTo(firstField.Row, firstField.Col);
+                    ParseOutput(record, TelnetConstants.HEADER_LENGTH);
                 }
-                _screen.NotifyScreenChanged();
+                finally
+                {
+                    // PUT_GET = output + invite: unlock the keyboard and position the cursor.
+                    // In a finally so it runs even if ParseOutput throws on a malformed screen —
+                    // otherwise the invite is lost and the operator is frozen with no way to type.
+                    _screen.InputInhibited = false;
+                    // If the host didn't leave the cursor on an enterable field, drop it
+                    // onto the first input field so the operator can type without Tab.
+                    var cursorField = _screen.GetFieldForCursor();
+                    if (cursorField == null || cursorField.Attribute.IsBypass)
+                    {
+                        var firstField = _screen.GetNextInputField(0, 0);
+                        if (firstField != null)
+                            _screen.MoveCursorTo(firstField.Row, firstField.Col);
+                    }
+                    _screen.NotifyScreenChanged();
+                }
                 break;
 
             case TelnetConstants.OPCODE_INVITE:

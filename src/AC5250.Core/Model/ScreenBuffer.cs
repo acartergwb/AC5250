@@ -114,9 +114,12 @@ public class ScreenBuffer
 
     public void SetBufferAddress(int row, int col)
     {
-        // 5250 uses 1-based addressing
-        _bufferRow = Math.Max(0, row - 1);
-        _bufferCol = Math.Max(0, col - 1);
+        // 5250 uses 1-based addressing. Clamp to the buffer (both bounds): a host that
+        // addresses beyond the current screen — e.g. a 27x132 layout drawn into a 24x80
+        // buffer — must not push the write position out of range, or a later field/char
+        // write (and field sync) throws and aborts the parse, freezing the keyboard.
+        _bufferRow = Math.Clamp(row - 1, 0, Rows - 1);
+        _bufferCol = Math.Clamp(col - 1, 0, Cols - 1);
     }
 
     public void SetCursorAddress(int row, int col)
