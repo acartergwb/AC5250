@@ -73,6 +73,11 @@ public static class TerminalRenderer
                             using var up = new Pen(colors.ColorFor(here.Color));
                             g.DrawLine(up, x, y + cellHeight - 1, x + cellWidth - 1, y + cellHeight - 1);
                         }
+                        else if (TryHealBorderGap(buffer, row, col, rows, out var healColor))
+                        {
+                            using var rb = new SolidBrush(colors.ColorFor(healColor));
+                            g.FillRectangle(rb, rect);
+                        }
                     }
 
                     if (!isFieldMarker)
@@ -139,6 +144,33 @@ public static class TerminalRenderer
             else
                 g.FillRectangle(cursorBrush, cx, cy + cellHeight - 3, cellWidth, 3);
         }
+    }
+
+    // A pop-up window's vertical frame is a column of reverse-video attribute cells. When the
+    // host redraws a blank interior row it sometimes writes a non-reverse attribute over that
+    // column (e.g. XBGTLOC row 11 gets 0x20 where the rows directly above and below carry 0x29
+    // red-reverse), leaving a one-row black notch in the frame. IBM ACS renders these frames
+    // solid regardless; we match it by filling the gap with the border colour when the same
+    // column directly above AND below are both reverse-video attribute cells of the same colour.
+    // The pattern (a lone non-reverse attribute cell vertically flanked by matching reverse
+    // attribute cells) is specific to a broken frame column and does not occur in body text.
+    private static bool TryHealBorderGap(
+        ScreenBuffer buffer, int row, int col, int rows, out Field5250Color color)
+    {
+        color = Field5250Color.Green;
+        if (row <= 0 || row >= rows - 1) return false;
+
+        byte above = buffer.GetAttributeByteAt(row - 1, col);
+        byte below = buffer.GetAttributeByteAt(row + 1, col);
+        if (above is < 0x20 or > 0x3F || below is < 0x20 or > 0x3F) return false;
+
+        var a = FieldAttribute.DecodeDisplay(above);
+        var b = FieldAttribute.DecodeDisplay(below);
+        if (!a.Reverse || !b.Reverse || a.NonDisplay || b.NonDisplay || a.Color != b.Color)
+            return false;
+
+        color = a.Color;
+        return true;
     }
 
     public static void RenderStatusBar(
