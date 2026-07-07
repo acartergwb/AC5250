@@ -36,6 +36,11 @@ public class ScreenBuffer
     public bool MessageWaiting { get; set; }
     public bool SystemAvailable { get; set; } = true;
 
+    // True once the host explicitly positioned the cursor (an Insert-Cursor / Move-Cursor
+    // order) during the current write. The parser resets it per PUT_GET; if it stays false,
+    // the host left the cursor to us and we home it to the field start (ACS behavior).
+    public bool CursorAddressed { get; set; }
+
     public event Action? ScreenChanged;
 
     /// <summary>
@@ -126,6 +131,7 @@ public class ScreenBuffer
     {
         CursorRow = Math.Clamp(row, 0, Rows - 1);
         CursorCol = Math.Clamp(col, 0, Cols - 1);
+        CursorAddressed = true;
     }
 
     public void InsertCursorHere()

@@ -48,8 +48,11 @@ public static class DataStreamWriter
             var fieldData = field.GetData();
             if (!IsNumericField(field.Attribute.Format))
             {
+                // Strip leading blanks — both EBCDIC space (0x40, typed) and null (0x00, the
+                // untouched cells left when the cursor is click-positioned to the right). Both
+                // mean "empty" (GetData trims the same pair from the tail).
                 int start = 0;
-                while (start < fieldData.Length && fieldData[start] == 0x40) start++; // 0x40 = EBCDIC space
+                while (start < fieldData.Length && (fieldData[start] == 0x40 || fieldData[start] == 0x00)) start++;
                 if (start > 0) fieldData = fieldData[start..];
             }
             data.AddRange(fieldData);
