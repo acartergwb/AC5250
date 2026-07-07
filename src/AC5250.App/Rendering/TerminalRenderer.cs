@@ -121,20 +121,25 @@ public static class TerminalRenderer
                     g.FillRectangle(rb, rect);
                 }
 
-                if (!eff.NonDisplay)
+                byte eb = field != null
+                    ? field.GetCharAt(field.GetIndexForPosition(row, col, cols))
+                    : buffer.GetCharAt(row, col);
+                char ch = Ebcdic.ToAscii(eb);
+                bool hasGlyph = ch > ' ' && ch <= '~';
+
+                if (!eff.NonDisplay && hasGlyph)
                 {
-                    byte eb = field != null
-                        ? field.GetCharAt(field.GetIndexForPosition(row, col, cols))
-                        : buffer.GetCharAt(row, col);
-                    char ch = Ebcdic.ToAscii(eb);
-                    if (ch > ' ' && ch <= '~')
-                    {
-                        Color textColor = eff.Reverse ? colors.Background : fg;
-                        TextRenderer.DrawText(g, ch.ToString(), font, rect, textColor, Color.Transparent, textFlags);
-                    }
+                    Color textColor = eff.Reverse ? colors.Background : fg;
+                    TextRenderer.DrawText(g, ch.ToString(), font, rect, textColor, Color.Transparent, textFlags);
                 }
 
-                if (eff.Underline)
+                // Underline field cells (so an empty input field still shows its underscore) and
+                // cells that carry a glyph — but NOT empty free-form cells. An underline attribute
+                // bleeds along the running character attribute until the next attribute byte, so
+                // one the host parks at a pop-up's bottom-right corner (e.g. 0x24 at col 24) would
+                // otherwise underline every cleared cell to the right and on every row below it,
+                // painting stray green horizontal lines that ACS does not show.
+                if (eff.Underline && (field != null || hasGlyph))
                 {
                     using var up = new Pen(eff.NonDisplay ? colors.InputUnderline : fg);
                     g.DrawLine(up, x, y + cellHeight - 1, x + cellWidth - 1, y + cellHeight - 1);
