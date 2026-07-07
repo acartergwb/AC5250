@@ -21,9 +21,15 @@ public class ConnectDialog : Form
 
     public ConnectionSettings Settings { get; private set; } = new();
 
-    public ConnectDialog()
+    // When true this dialog edits a saved connection (persists to ConnectionStore on OK)
+    // instead of returning settings to connect. Used by Manage Saved Connections.
+    private readonly bool _saveOnly;
+
+    public ConnectDialog(ConnectionSettings? preset = null, bool saveOnly = false)
     {
+        _saveOnly = saveOnly;
         InitializeComponent();
+        if (preset != null) FillFrom(preset);
     }
 
     private void InitializeComponent()
@@ -171,7 +177,7 @@ public class ConnectDialog : Form
         int buttonY = y;
         _okButton = new Button
         {
-            Text = "Connect",
+            Text = _saveOnly ? "Save" : "Connect",
             DialogResult = DialogResult.OK,
             Location = new Point(contentRight - 86, buttonY),
             Size = new Size(86, 32),
@@ -329,5 +335,6 @@ public class ConnectDialog : Form
         }
 
         Settings = BuildSettings();
+        if (_saveOnly) ConnectionStore.Upsert(Settings);
     }
 }

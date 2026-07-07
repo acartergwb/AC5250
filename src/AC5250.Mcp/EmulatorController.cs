@@ -158,15 +158,15 @@ public sealed class EmulatorController
     /// OS credential store on this machine and is never accepted as a parameter nor
     /// returned — the resulting snapshot masks the (non-display) password field.
     /// </summary>
-    public async Task<ScreenSnapshot> SignOnAsync(string? sessionId, int settleMs, CancellationToken ct)
+    public async Task<ScreenSnapshot> SignOnAsync(string? sessionId, string? credentialLabel, int settleMs, CancellationToken ct)
     {
         var s = Resolve(sessionId);
 
         if (_credentials is null)
             throw new McpException("Credential sign-on is not available in this host.");
-        var creds = _credentials.Get(s.Settings.HostName);
+        var creds = _credentials.Get(s.Settings.HostName, credentialLabel);
         if (creds is null)
-            throw new McpException(NoCredentialsMessage(s.Settings.HostName));
+            throw new McpException(NoCredentialsMessage(s.Settings.HostName, credentialLabel));
 
         var (userIdx, pwIdx) = _marshal.Invoke(() => FindSignOnFields(s));
         if (userIdx < 0 || pwIdx < 0)
@@ -186,15 +186,21 @@ public sealed class EmulatorController
         return Snapshot(s);
     }
 
-    /// <summary>Explain where to put credentials for a host, tailored to the platform:
-    /// the desktop dialog on Windows, environment variables everywhere else.</summary>
-    private static string NoCredentialsMessage(string host)
+    /// <summary>Explain where to put credentials for a host/label, tailored to the platform:
+    /// the desktop dialog on Windows, environment variables everywhere else. Lists the labels
+    /// that DO exist for the host so the caller can pick a valid one.</summary>
+    private string NoCredentialsMessage(string host, string? label)
     {
-        var (userVar, pwVar) = EnvironmentCredentialSource.VarNamesFor(host);
-        string envHint = $"set {userVar} and {pwVar} (or {EnvironmentCredentialSource.Prefix}USER / {EnvironmentCredentialSource.Prefix}PASSWORD) in this process's environment";
+        IReadOnlyList<string> labels = _credentials?.Labels(host) ?? Array.Empty<string>();
+        string avail = labels.Count > 0
+            ? $" Available labels for this host: {string.Join(", ", labels)}."
+            : "";
+        string forLabel = string.IsNullOrWhiteSpace(label) ? "" : $" (label '{label}')";
+        var (userVar, pwVar) = EnvironmentCredentialSource.VarNamesFor(host, label);
+        string envHint = $"set {userVar} and {pwVar} in this process's environment";
         return OperatingSystem.IsWindows()
-            ? $"No saved credentials for host '{host}'. Add them in the emulator (Session > Manage Saved Credentials), or {envHint}."
-            : $"No saved credentials for host '{host}'. On this platform, {envHint}.";
+            ? $"No saved credentials for host '{host}'{forLabel}. Add them in the emulator (Session > Manage Saved Credentials), or {envHint}.{avail}"
+            : $"No saved credentials for host '{host}'{forLabel}. On this platform, {envHint}.{avail}";
     }
 
     /// <summary>Locate the sign-on user field (first visible, non-protected input) and
