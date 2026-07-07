@@ -713,12 +713,16 @@ public class MainForm : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        // Don't block the app's close on MCP host shutdown. When an MCP client is connected,
+        // the host's graceful stop waits on the client's long-lived SSE session and ignores the
+        // shutdown timeout (~3s). We're exiting anyway, so tear the host down best-effort on a
+        // background thread and let process exit reclaim the loopback socket — verified that an
+        // un-stopped Kestrel host does not keep the process alive. Closing is now instant.
         if (_mcpHost != null)
         {
-            // DisposeAsync caps the host's graceful shutdown short (see McpHost) and uses
-            // ConfigureAwait(false), so this Wait returns promptly and can't deadlock.
-            try { _mcpHost.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(3)); } catch { /* shutting down */ }
+            var host = _mcpHost;
             _mcpHost = null;
+            _ = Task.Run(async () => { try { await host.DisposeAsync(); } catch { /* exiting */ } });
         }
         _sessionManager.CloseAll();
         base.OnFormClosing(e);
