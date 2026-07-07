@@ -22,6 +22,27 @@ public class SessionTabBar : Control
     private bool _pressedNewTab;
     private int _pressedCloseIndex = -1;
 
+    // Chrome-style animated drag: the grabbed tab floats under the cursor while the others
+    // ease toward their slots. _grabDX is where inside the tab it was grabbed; _dragPointerX
+    // tracks the cursor; _detaching lifts the tab when a release would tear it into a window.
+    private int _grabDX;
+    private int _dragPointerX;
+    private bool _detaching;
+    private TabDragGhost? _ghost;               // floating preview shown while tearing a tab out
+    private readonly System.Windows.Forms.Timer _animTimer;
+    private const float EaseFactor = 0.32f;    // per-tick easing toward the target slot
+
+    private static Point GhostPosition()        // just below-right of the pointer
+        => new(Cursor.Position.X - 90, Cursor.Position.Y + 16);
+
+    private void ShowGhost(string title)
+    {
+        _ghost ??= new TabDragGhost();
+        _ghost.Present(title, GhostPosition());
+    }
+
+    private void HideGhost() => _ghost?.Hide();
+
     private const int TabHeight = 34;
     private const int TabPadding = 16;
     private const int CloseButtonSize = 16;
@@ -68,6 +89,15 @@ public class SessionTabBar : Control
         Dock = DockStyle.Top;
         BackColor = DarkTheme.Background;
         Font = DarkTheme.UIFont;
+
+        _animTimer = new System.Windows.Forms.Timer { Interval = 15 };   // ~66 fps
+        _animTimer.Tick += OnAnimTick;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) { _animTimer.Dispose(); _ghost?.Dispose(); }
+        base.Dispose(disposing);
     }
 
     public int TabCount => _tabs.Count;
@@ -76,6 +106,7 @@ public class SessionTabBar : Control
     {
         _tabs.Add(new TabItem { Title = title, Tag = tag });
         SelectedIndex = _tabs.Count - 1;
+        StartAnim();     // existing tabs ease to their new (narrower) slots; the new one snaps in
         Invalidate();
     }
 
@@ -88,6 +119,7 @@ public class SessionTabBar : Control
             _selectedIndex = _tabs.Count - 1;
 
         SelectedIndexChanged?.Invoke(this, EventArgs.Empty);
+        StartAnim();     // remaining tabs slide to fill the gap
         Invalidate();
     }
 
@@ -121,10 +153,50 @@ public class SessionTabBar : Control
         return Math.Clamp(w, MinTabWidth, MaxTabWidth);
     }
 
-    private Rectangle GetTabRect(int index)
+    // Logical (resting) slot of a tab — used for hit-testing (hover/close/click). Painting
+    // uses PaintRect, which follows the eased AnimX so tabs slide instead of snapping.
+    private Rectangle GetTabRect(int index) => new(SlotX(index), 0, GetTabWidth(), TabHeight);
+
+    private int SlotX(int index) => 4 + index * GetTabWidth();
+
+    private Rectangle PaintRect(int index)
     {
+        EnsureAnimInit();
+        return new Rectangle((int)MathF.Round(_tabs[index].AnimX), 0, GetTabWidth(), TabHeight);
+    }
+
+    // Seed AnimX for any tab not yet positioned (new tabs appear at their slot).
+    private void EnsureAnimInit()
+    {
+        for (int i = 0; i < _tabs.Count; i++)
+            if (float.IsNaN(_tabs[i].AnimX)) _tabs[i].AnimX = SlotX(i);
+    }
+
+    private void StartAnim() { if (!_animTimer.Enabled) _animTimer.Start(); }
+
+    private void OnAnimTick(object? sender, EventArgs e)
+    {
+        EnsureAnimInit();
         int tabWidth = GetTabWidth();
-        return new Rectangle(4 + index * tabWidth, 0, tabWidth, TabHeight);
+        bool moving = false;
+
+        for (int i = 0; i < _tabs.Count; i++)
+        {
+            if (_dragging && i == _pressIndex)
+            {
+                // Grabbed tab tracks the cursor (clamped to the strip); no easing.
+                _tabs[i].AnimX = Math.Clamp(_dragPointerX - _grabDX, 4f, Math.Max(4, Width - tabWidth - 4));
+                moving = true;
+                continue;
+            }
+            float target = SlotX(i);
+            float cur = _tabs[i].AnimX;
+            if (Math.Abs(target - cur) < 0.5f) _tabs[i].AnimX = target;
+            else { _tabs[i].AnimX = cur + (target - cur) * EaseFactor; moving = true; }
+        }
+
+        Invalidate();
+        if (!_dragging && !moving) _animTimer.Stop();
     }
 
     private Rectangle GetCloseRect(int index)
@@ -158,57 +230,16 @@ public class SessionTabBar : Control
         using var borderPen = new Pen(DarkTheme.BorderSubtle);
         g.DrawLine(borderPen, 0, Height - 1, Width, Height - 1);
 
-        int tabWidth = GetTabWidth();
+        EnsureAnimInit();
 
+        // Paint non-dragged tabs at their eased positions, then the grabbed tab on top so it
+        // floats over its neighbours while they slide out of the way.
         for (int i = 0; i < _tabs.Count; i++)
-        {
-            var rect = GetTabRect(i);
-            bool isSelected = i == _selectedIndex;
-            bool isHover = i == _hoverIndex;
+            if (!(_dragging && i == _pressIndex))
+                DrawTab(g, i, PaintRect(i), lifted: false);
 
-            // Tab background
-            if (isSelected)
-            {
-                using var brush = new SolidBrush(DarkTheme.SurfaceLight);
-                var tabArea = new Rectangle(rect.X + 1, rect.Y + 2, rect.Width - 2, rect.Height - 2);
-                FillRoundedRect(g, brush, tabArea, 6, roundBottom: false);
-
-                // Active indicator line at top
-                using var accentPen = new Pen(DarkTheme.Accent, 2);
-                g.DrawLine(accentPen, rect.X + 6, rect.Y + 2, rect.Right - 6, rect.Y + 2);
-            }
-            else if (isHover)
-            {
-                using var brush = new SolidBrush(DarkTheme.Surface);
-                var tabArea = new Rectangle(rect.X + 1, rect.Y + 2, rect.Width - 2, rect.Height - 2);
-                FillRoundedRect(g, brush, tabArea, 6, roundBottom: false);
-            }
-
-            // Tab title
-            var textColor = isSelected ? DarkTheme.TextPrimary : DarkTheme.TextSecondary;
-            var titleRect = new Rectangle(rect.X + TabPadding, rect.Y, rect.Width - TabPadding * 2 - CloseButtonSize, rect.Height);
-            TextRenderer.DrawText(g, _tabs[i].Title, Font, titleRect, textColor,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
-
-            // Close button
-            if (isSelected || isHover)
-            {
-                var closeRect = GetCloseRect(i);
-                bool closeHover = i == _hoverCloseIndex;
-
-                if (closeHover)
-                {
-                    using var closeBgBrush = new SolidBrush(Color.FromArgb(60, DarkTheme.Danger));
-                    FillRoundedRect(g, closeBgBrush, closeRect, 4);
-                }
-
-                var closeColor = closeHover ? DarkTheme.Danger : DarkTheme.TextMuted;
-                using var closePen = new Pen(closeColor, 1.5f);
-                int m = 4;
-                g.DrawLine(closePen, closeRect.X + m, closeRect.Y + m, closeRect.Right - m, closeRect.Bottom - m);
-                g.DrawLine(closePen, closeRect.Right - m, closeRect.Y + m, closeRect.X + m, closeRect.Bottom - m);
-            }
-        }
+        if (_dragging && _pressIndex >= 0 && _pressIndex < _tabs.Count)
+            DrawTab(g, _pressIndex, PaintRect(_pressIndex), lifted: _detaching);
 
         // "+" new-tab button
         var newRect = GetNewTabRect();
@@ -224,6 +255,60 @@ public class SessionTabBar : Control
         const int arm = 5;
         g.DrawLine(plusPen, px - arm, py, px + arm, py);
         g.DrawLine(plusPen, px, py - arm, px, py + arm);
+    }
+
+    private void DrawTab(Graphics g, int i, Rectangle rect, bool lifted)
+    {
+        bool isSelected = i == _selectedIndex;
+        bool isHover = i == _hoverIndex;
+        bool isDragged = _dragging && i == _pressIndex;
+
+        if (lifted)
+        {
+            // Tear-out affordance: raise the tab and drop a soft shadow so it clearly lifts off.
+            rect.Y -= 5;
+            using var shadow = new SolidBrush(Color.FromArgb(110, 0, 0, 0));
+            FillRoundedRect(g, shadow, new Rectangle(rect.X + 2, rect.Y + 5, rect.Width - 2, rect.Height - 2), 6);
+        }
+
+        if (isSelected)
+        {
+            using var brush = new SolidBrush(DarkTheme.SurfaceLight);
+            FillRoundedRect(g, brush, new Rectangle(rect.X + 1, rect.Y + 2, rect.Width - 2, rect.Height - 2), 6, roundBottom: lifted);
+            using var accentPen = new Pen(DarkTheme.Accent, 2);
+            g.DrawLine(accentPen, rect.X + 6, rect.Y + 2, rect.Right - 6, rect.Y + 2);
+        }
+        else if (isHover)
+        {
+            using var brush = new SolidBrush(DarkTheme.Surface);
+            FillRoundedRect(g, brush, new Rectangle(rect.X + 1, rect.Y + 2, rect.Width - 2, rect.Height - 2), 6, roundBottom: false);
+        }
+
+        var textColor = isSelected ? DarkTheme.TextPrimary : DarkTheme.TextSecondary;
+        var titleRect = new Rectangle(rect.X + TabPadding, rect.Y, rect.Width - TabPadding * 2 - CloseButtonSize, rect.Height);
+        TextRenderer.DrawText(g, _tabs[i].Title, Font, titleRect, textColor,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+
+        // Close button — hidden on the tab that's currently being dragged.
+        if ((isSelected || isHover) && !isDragged)
+        {
+            int cx = rect.Right - CloseButtonSize - 8;
+            int cy = rect.Y + (rect.Height - CloseButtonSize) / 2;
+            var closeRect = new Rectangle(cx, cy, CloseButtonSize, CloseButtonSize);
+            bool closeHover = i == _hoverCloseIndex;
+
+            if (closeHover)
+            {
+                using var closeBgBrush = new SolidBrush(Color.FromArgb(60, DarkTheme.Danger));
+                FillRoundedRect(g, closeBgBrush, closeRect, 4);
+            }
+
+            var closeColor = closeHover ? DarkTheme.Danger : DarkTheme.TextMuted;
+            using var closePen = new Pen(closeColor, 1.5f);
+            int m = 4;
+            g.DrawLine(closePen, closeRect.X + m, closeRect.Y + m, closeRect.Right - m, closeRect.Bottom - m);
+            g.DrawLine(closePen, closeRect.Right - m, closeRect.Y + m, closeRect.X + m, closeRect.Bottom - m);
+        }
     }
 
     private static void FillRoundedRect(Graphics g, Brush brush, Rectangle rect, int radius, bool roundBottom = true)
@@ -274,9 +359,10 @@ public class SessionTabBar : Control
             }
             if (GetTabRect(i).Contains(e.Location))
             {
-                SelectedIndex = i;      // select on press so click-to-select still works
-                _pressIndex = i;        // and mark it as a candidate for a reorder drag
+                SelectedIndex = i;          // select on press so click-to-select still works
+                _pressIndex = i;            // and mark it as a candidate for a reorder drag
                 _pressX = e.X;
+                _grabDX = e.X - SlotX(i);   // where inside the tab it was grabbed
                 return;
             }
         }
@@ -292,18 +378,39 @@ public class SessionTabBar : Control
             if (!_dragging && Math.Abs(e.X - _pressX) > DragThreshold) _dragging = true;
             if (_dragging)
             {
-                int target = TabIndexAtX(e.X);
-                if (target >= 0 && target != _pressIndex)
+                _dragPointerX = e.X;
+
+                // Tear-out preview: lift the tab and show a floating ghost that follows the
+                // cursor once the drag leaves the strip (off the window or dragged below it) —
+                // the same test the drop uses in OnMouseUp.
+                var form = FindForm();
+                bool off = form != null && !form.Bounds.Contains(PointToScreen(e.Location));
+                bool wasDetaching = _detaching;
+                _detaching = _tabs.Count > 1 && (off || e.Y > Height + 40);
+                if (_detaching)
+                {
+                    if (!wasDetaching) ShowGhost(_tabs[_pressIndex].Title);
+                    _ghost?.MoveTo(GhostPosition());
+                }
+                else if (wasDetaching) HideGhost();
+
+                // Reorder when the floating tab's CENTRE crosses into another slot (so grabbing
+                // near a tab edge doesn't feel offset).
+                int tabWidth = GetTabWidth();
+                float floatLeft = Math.Clamp(e.X - _grabDX, 4f, Math.Max(4, Width - tabWidth - 4));
+                int target = TabIndexAtX((int)(floatLeft + tabWidth / 2f));
+                if (!_detaching && target >= 0 && target != _pressIndex)
                 {
                     var item = _tabs[_pressIndex];
                     _tabs.RemoveAt(_pressIndex);
                     _tabs.Insert(target, item);
                     _selectedIndex = target;   // dragged tab stays selected (set field: no re-activate)
                     _pressIndex = target;
-                    Invalidate();
                 }
+
                 Cursor = Cursors.SizeAll;
-                return;   // suppress hover changes while dragging
+                StartAnim();                   // the timer repaints; drives the slide/float
+                return;                        // suppress hover changes while dragging
             }
         }
 
@@ -344,14 +451,13 @@ public class SessionTabBar : Control
             var screenPt = PointToScreen(e.Location);
             var form = FindForm();
             bool droppedOffWindow = form != null && !form.Bounds.Contains(screenPt);
-            bool draggedBelowStrip = e.Y > Height + 60;
+            bool draggedBelowStrip = e.Y > Height + 40;
             if (droppedOffWindow || draggedBelowStrip)
             {
                 int idx = _pressIndex;
                 ResetPress();
                 Cursor = Cursors.Default;
                 TabDetached?.Invoke(idx, screenPt);
-                Invalidate();
                 return;
             }
         }
@@ -368,15 +474,17 @@ public class SessionTabBar : Control
 
         ResetPress();
         Cursor = Cursors.Default;
-        Invalidate();
+        StartAnim();     // ease the dropped tab back into its slot (tick stops once settled)
     }
 
     private void ResetPress()
     {
         _pressIndex = -1;
         _dragging = false;
+        _detaching = false;
         _pressedNewTab = false;
         _pressedCloseIndex = -1;
+        HideGhost();
     }
 
     protected override void OnMouseLeave(EventArgs e)
@@ -395,5 +503,70 @@ public class SessionTabBar : Control
     {
         public string Title { get; set; } = "";
         public object? Tag { get; set; }
+        public float AnimX = float.NaN;   // animated left edge; NaN = not yet positioned
+    }
+}
+
+/// <summary>A small floating, non-activating, top-most preview shown while a tab is being torn
+/// out of its window, so the detach is unmistakable. It never takes focus or mouse capture, so
+/// the tab bar keeps receiving the drag.</summary>
+internal sealed class TabDragGhost : Form
+{
+    private string _title = "";
+
+    public TabDragGhost()
+    {
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        StartPosition = FormStartPosition.Manual;
+        Size = new Size(190, 38);
+        DoubleBuffered = true;
+        BackColor = DarkTheme.SurfaceLight;
+        Enabled = false;   // never interactive
+    }
+
+    protected override bool ShowWithoutActivation => true;
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            const int WS_EX_NOACTIVATE = 0x08000000, WS_EX_TOOLWINDOW = 0x00000080, WS_EX_TOPMOST = 0x00000008;
+            var cp = base.CreateParams;
+            cp.ExStyle |= WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
+            return cp;
+        }
+    }
+
+    public void Present(string title, Point screenLocation)
+    {
+        _title = title;
+        Location = screenLocation;
+        Invalidate();
+        if (!Visible) Show();
+    }
+
+    public void MoveTo(Point screenLocation) => Location = screenLocation;
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        var r = new Rectangle(0, 0, Width - 1, Height - 1);
+        using var path = new System.Drawing.Drawing2D.GraphicsPath();
+        int d = 12;
+        path.AddArc(r.X, r.Y, d, d, 180, 90);
+        path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+        path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        path.CloseFigure();
+
+        using var bg = new SolidBrush(DarkTheme.Surface);
+        using var border = new Pen(DarkTheme.Accent, 2);
+        g.FillPath(bg, path);
+        g.DrawPath(border, path);
+        TextRenderer.DrawText(g, _title, DarkTheme.UIFont, r, DarkTheme.TextPrimary,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+            TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
     }
 }
