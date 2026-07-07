@@ -240,12 +240,19 @@ public class TerminalSession : IDisposable
     {
         if (Screen.InputInhibited) return;
 
-        MoveCursorLeft();
+        // Backspace deletes the character to the LEFT and moves the cursor left, but must
+        // stay inside the current input field — it must never slide into a protected/constant
+        // cell (ACS won't let you edit those). Previously it moved the cursor first and only
+        // then checked the field, so at a field's left edge the cursor backed into protected
+        // space. Now: at the field's first position (or outside any editable field) it's a no-op.
         var field = Screen.GetFieldForCursor();
         if (field == null || field.Attribute.IsBypass) return;
 
         int idx = field.GetIndexForPosition(Screen.CursorRow, Screen.CursorCol, Screen.Cols);
-        field.DeleteCharAt(idx);
+        if (idx <= 0) return; // at the field start — don't back into the protected area
+
+        Screen.MoveCursorBack();
+        field.DeleteCharAt(idx - 1);
         Screen.SyncFieldToBuffer(field);
         Screen.NotifyScreenChanged();
     }
