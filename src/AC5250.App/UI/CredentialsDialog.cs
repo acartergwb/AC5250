@@ -1,22 +1,28 @@
 using AC5250.Security;
+using AC5250.Session;
 
 namespace AC5250.UI;
 
 /// <summary>
-/// Manage IBM i sign-on credentials stored in the Windows Credential Manager. A host can hold
+/// Manage IBM i sign-on credentials in the Windows Credential Manager. Each credential is bound
+/// to a <em>saved connection</em> (not just a host), so two connections to the same host can hold
+/// different logins and a login follows its connection through a rename. A connection can hold
 /// several logins, each under a short label (e.g. "ADMIN", "TESTUSER"); one may be marked the
-/// default. Used by the MCP `signon` tool and the Session menu to fill the sign-on screen
-/// without exposing the password. Passwords are never displayed back — to change one, re-enter it.
+/// default. Used by the Home page's Quick Launch, the Session menu, and the MCP `signon` tool.
+/// Passwords are never displayed back — to change one, re-enter it.
 /// </summary>
 internal sealed class CredentialsDialog : Form
 {
     private readonly ListBox _list = new();
-    private readonly TextBox _hostBox = new();
+    private readonly ComboBox _connCombo = new();
+    private readonly Label _noConnLabel = new();
     private readonly TextBox _labelBox = new();
     private readonly TextBox _userBox = new();
     private readonly TextBox _pwBox = new();
-    private List<(string Host, string Label, string User)> _entries = new();
-    private string? _editHost;    // the entry currently loaded from the list (null = creating new)
+
+    private List<ConnectionSettings> _connections = new();
+    private List<(ConnectionSettings Conn, string Label, string User)> _entries = new();
+    private string? _editConnId;    // the entry currently loaded from the list (null = creating new)
     private string? _editLabel;
 
     public CredentialsDialog()
@@ -29,7 +35,7 @@ internal sealed class CredentialsDialog : Form
         BackColor = DarkTheme.Surface;
         ForeColor = DarkTheme.TextPrimary;
         Font = DarkTheme.UIFont;
-        ClientSize = new Size(480, 404);
+        ClientSize = new Size(480, 410);
         HandleCreated += (_, _) => MainForm.ApplyDarkTitleBar(this);
 
         Controls.Add(new Label
@@ -48,9 +54,20 @@ internal sealed class CredentialsDialog : Form
         _list.SelectedIndexChanged += OnSelect;
         Controls.Add(_list);
 
-        AddLabel("Host", 16, 200);
-        Config(_hostBox, 110, 196, 354);
-        _hostBox.PlaceholderText = "hostname or IP (e.g. 10.1.1.1)";
+        AddLabel("Connection", 16, 200);
+        _connCombo.SetBounds(110, 196, 354, 28);
+        _connCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+        _connCombo.FlatStyle = FlatStyle.Flat;
+        _connCombo.BackColor = DarkTheme.Background;
+        _connCombo.ForeColor = DarkTheme.TextPrimary;
+        Controls.Add(_connCombo);
+
+        // Shown instead of the combo when there are no saved connections to attach a login to.
+        _noConnLabel.SetBounds(110, 200, 354, 22);
+        _noConnLabel.Text = "No saved connections — add one via File ▸ Manage Saved Connections.";
+        _noConnLabel.ForeColor = DarkTheme.TextMuted;
+        _noConnLabel.Visible = false;
+        Controls.Add(_noConnLabel);
 
         AddLabel("Label", 16, 234);
         Config(_labelBox, 110, 230, 354);
@@ -64,43 +81,72 @@ internal sealed class CredentialsDialog : Form
         _pwBox.UseSystemPasswordChar = true;
         _pwBox.PlaceholderText = "leave blank to keep, or re-enter to change";
 
-        var newBtn = MakeButton("New", 16, 338, 60);
+        var newBtn = MakeButton("New", 16, 344, 60);
         newBtn.Click += OnNew;
-        var save = MakeButton("Save", 82, 338, 66);
+        var save = MakeButton("Save", 82, 344, 66);
         save.Click += OnSave;
-        var del = MakeButton("Delete", 154, 338, 66);
+        var del = MakeButton("Delete", 154, 344, 66);
         del.Click += OnDelete;
-        var def = MakeButton("Set Default", 226, 338, 96);
+        var def = MakeButton("Set Default", 226, 344, 96);
         def.Click += OnSetDefault;
-        var close = MakeButton("Close", 386, 338, 78);
+        var close = MakeButton("Close", 386, 344, 78);
         close.DialogResult = DialogResult.OK;
 
         AcceptButton = save;
         CancelButton = close;
+
+        LoadConnections();
         Refresh_();
+    }
+
+    private void LoadConnections()
+    {
+        _connections = ConnectionStore.Load();
+        _connCombo.Items.Clear();
+        foreach (var c in _connections) _connCombo.Items.Add(c.DisplayName);
+
+        bool has = _connections.Count > 0;
+        _connCombo.Visible = has;
+        _noConnLabel.Visible = !has;
+        if (has) _connCombo.SelectedIndex = 0;
+    }
+
+    private ConnectionSettings? SelectedConnection()
+    {
+        int i = _connCombo.SelectedIndex;
+        return i >= 0 && i < _connections.Count ? _connections[i] : null;
     }
 
     private void Refresh_()
     {
-        _entries = CredentialStore.List()
-            .OrderBy(e => e.Host).ThenBy(e => e.Label)
+        // All connection-scoped credentials, mapped to their connection; orphans (whose
+        // connection was deleted) are skipped.
+        var byId = new Dictionary<string, ConnectionSettings>(StringComparer.OrdinalIgnoreCase);
+        foreach (var c in _connections)
+            if (!string.IsNullOrEmpty(c.Id)) byId[c.Id] = c;
+
+        _entries = CredentialStore.ListForConnection()
+            .Where(e => byId.ContainsKey(e.ConnId))
+            .Select(e => (Conn: byId[e.ConnId], e.Label, e.User))
+            .OrderBy(e => e.Conn.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(e => e.Label, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        // Precompute the default label and count per host for the "[default]" marker.
-        var defaults = _entries.Select(e => e.Host).Distinct()
-            .ToDictionary(h => h, h => CredentialStore.GetDefaultLabel(h), StringComparer.OrdinalIgnoreCase);
-        var counts = _entries.GroupBy(e => e.Host, StringComparer.OrdinalIgnoreCase)
+        // Default label + count per connection, for the "[default]" marker.
+        var defaults = _entries.Select(e => e.Conn.Id).Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(id => id, id => CredentialStore.GetDefaultLabelForConnection(id), StringComparer.OrdinalIgnoreCase);
+        var counts = _entries.GroupBy(e => e.Conn.Id, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
 
         _list.Items.Clear();
         foreach (var e in _entries)
         {
-            defaults.TryGetValue(e.Host, out string? defLabel);
+            defaults.TryGetValue(e.Conn.Id, out string? defLabel);
             bool isDefault = defLabel != null
                 ? string.Equals(defLabel, e.Label, StringComparison.OrdinalIgnoreCase)
-                : counts[e.Host] == 1;
+                : counts[e.Conn.Id] == 1;
             string user = string.IsNullOrEmpty(e.User) ? "" : $"   ({e.User})";
-            _list.Items.Add($"{e.Host}  ›  {e.Label}{user}{(isDefault ? "   [default]" : "")}");
+            _list.Items.Add($"{e.Conn.DisplayName}  ›  {e.Label}{user}{(isDefault ? "   [default]" : "")}");
         }
     }
 
@@ -108,12 +154,20 @@ internal sealed class CredentialsDialog : Form
     {
         int i = _list.SelectedIndex;
         if (i < 0 || i >= _entries.Count) return;
-        _hostBox.Text = _entries[i].Host;
-        _labelBox.Text = _entries[i].Label;
-        _userBox.Text = _entries[i].User;
+        var entry = _entries[i];
+        SelectConnectionInCombo(entry.Conn.Id);
+        _labelBox.Text = entry.Label;
+        _userBox.Text = entry.User;
         _pwBox.Text = ""; // never surface stored passwords
-        _editHost = _entries[i].Host;   // remember what we're editing, so a rename removes the original
-        _editLabel = _entries[i].Label;
+        _editConnId = entry.Conn.Id;   // remember what we're editing, so a move removes the original
+        _editLabel = entry.Label;
+    }
+
+    private void SelectConnectionInCombo(string connId)
+    {
+        for (int i = 0; i < _connections.Count; i++)
+            if (string.Equals(_connections[i].Id, connId, StringComparison.OrdinalIgnoreCase))
+            { _connCombo.SelectedIndex = i; return; }
     }
 
     private string LabelOrDefault() =>
@@ -121,23 +175,24 @@ internal sealed class CredentialsDialog : Form
 
     private void OnSave(object? sender, EventArgs e)
     {
-        string host = _hostBox.Text.Trim();
-        if (string.IsNullOrEmpty(host))
+        var conn = SelectedConnection();
+        if (conn == null)
         {
-            _hostBox.BackColor = Color.FromArgb(60, 30, 30);
-            _hostBox.Focus();
+            MessageBox.Show(this, "Add a saved connection first (File ▸ Manage Saved Connections).",
+                "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
+        string connId = conn.Id;
         string label = LabelOrDefault();
 
-        // Password left blank keeps the stored one — of the entry being edited (so a rename
-        // still keeps it), or of the target host/label when creating fresh.
+        // Password left blank keeps the stored one — of the entry being edited (so a move still
+        // keeps it), or of the target connection/label when creating fresh.
         string password = _pwBox.Text;
         if (password.Length == 0)
         {
-            var existing = _editHost != null
-                ? CredentialStore.Get(_editHost, _editLabel)
-                : CredentialStore.Get(host, label);
+            var existing = _editConnId != null
+                ? CredentialStore.GetForConnection(_editConnId, _editLabel)
+                : CredentialStore.GetForConnection(connId, label);
             if (existing is null)
             {
                 _pwBox.BackColor = Color.FromArgb(60, 30, 30);
@@ -147,52 +202,54 @@ internal sealed class CredentialsDialog : Form
             password = existing.Value.Password;
         }
 
-        // Renaming/moving an existing entry: remove the original so we don't leave a duplicate.
-        if (_editHost != null &&
-            (!string.Equals(_editHost, host, StringComparison.OrdinalIgnoreCase) ||
+        // Moving an existing entry to a different connection/label: remove the original so we
+        // don't leave a duplicate.
+        if (_editConnId != null &&
+            (!string.Equals(_editConnId, connId, StringComparison.OrdinalIgnoreCase) ||
              !string.Equals(_editLabel, label, StringComparison.OrdinalIgnoreCase)))
-            CredentialStore.Delete(_editHost, _editLabel!);
+            CredentialStore.DeleteForConnection(_editConnId, _editLabel!);
 
-        CredentialStore.Save(host, label, _userBox.Text.Trim(), password);
+        CredentialStore.SaveForConnection(connId, label, _userBox.Text.Trim(), password);
         _pwBox.Text = "";
         Refresh_();
-        SelectEntry(host, label);
+        SelectEntry(connId, label);
     }
 
     private void OnDelete(object? sender, EventArgs e)
     {
-        string host = _editHost ?? _hostBox.Text.Trim();
+        string? connId = _editConnId ?? SelectedConnection()?.Id;
         string label = _editLabel ?? LabelOrDefault();
-        if (string.IsNullOrEmpty(host)) return;
-        CredentialStore.Delete(host, label);
+        if (string.IsNullOrEmpty(connId)) return;
+        CredentialStore.DeleteForConnection(connId, label);
         ClearForm();
         Refresh_();
     }
 
     private void OnSetDefault(object? sender, EventArgs e)
     {
-        string host = _editHost ?? _hostBox.Text.Trim();
+        string? connId = _editConnId ?? SelectedConnection()?.Id;
         string label = _editLabel ?? LabelOrDefault();
-        if (string.IsNullOrEmpty(host)) return;
-        CredentialStore.SetDefaultLabel(host, label);
+        if (string.IsNullOrEmpty(connId)) return;
+        CredentialStore.SetDefaultLabelForConnection(connId, label);
         Refresh_();
-        SelectEntry(host, label);
+        SelectEntry(connId, label);
     }
 
     private void OnNew(object? sender, EventArgs e) => ClearForm();
 
     private void ClearForm()
     {
-        _editHost = _editLabel = null;
+        _editConnId = _editLabel = null;
         _list.ClearSelected();
-        _hostBox.Text = _labelBox.Text = _userBox.Text = _pwBox.Text = "";
-        _hostBox.Focus();
+        _labelBox.Text = _userBox.Text = _pwBox.Text = "";
+        if (_connections.Count > 0) _connCombo.SelectedIndex = 0;
+        _labelBox.Focus();
     }
 
-    private void SelectEntry(string host, string label)
+    private void SelectEntry(string connId, string label)
     {
         for (int i = 0; i < _entries.Count; i++)
-            if (string.Equals(_entries[i].Host, host, StringComparison.OrdinalIgnoreCase) &&
+            if (string.Equals(_entries[i].Conn.Id, connId, StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(_entries[i].Label, label, StringComparison.OrdinalIgnoreCase))
             {
                 _list.SelectedIndex = i;   // fires OnSelect -> refreshes the edit target
@@ -233,7 +290,7 @@ internal sealed class CredentialsDialog : Form
     }
 }
 
-/// <summary>Small modal that asks which credential label to use when a host has several.</summary>
+/// <summary>Small modal that asks which credential label to use when a connection (or host) has several.</summary>
 internal sealed class CredentialPicker : Form
 {
     private readonly ListBox _list = new();

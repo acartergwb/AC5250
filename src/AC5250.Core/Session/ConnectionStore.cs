@@ -20,13 +20,24 @@ public static class ConnectionStore
         try
         {
             if (!File.Exists(FilePath)) return new();
-            return JsonSerializer.Deserialize<List<ConnectionSettings>>(File.ReadAllText(FilePath)) ?? new();
+            var list = JsonSerializer.Deserialize<List<ConnectionSettings>>(File.ReadAllText(FilePath)) ?? new();
+
+            // Backfill stable ids for connections saved before ids existed, so credentials can
+            // key to them. Persist only if something actually changed.
+            bool changed = false;
+            foreach (var c in list)
+                if (string.IsNullOrEmpty(c.Id)) { c.Id = NewId(); changed = true; }
+            if (changed) Save(list);
+
+            return list;
         }
         catch
         {
             return new();
         }
     }
+
+    public static string NewId() => Guid.NewGuid().ToString("N");
 
     public static void Save(List<ConnectionSettings> connections)
     {
@@ -41,11 +52,16 @@ public static class ConnectionStore
         }
     }
 
-    /// <summary>Add or replace a configuration (matched by its display name), then save.</summary>
+    /// <summary>Add or replace a configuration, then save. Matched by <see cref="ConnectionSettings.Id"/>
+    /// when the incoming settings carries one (so a rename updates in place), otherwise by display
+    /// name. A new configuration with no id is assigned one here.</summary>
     public static List<ConnectionSettings> Upsert(ConnectionSettings settings)
     {
+        if (string.IsNullOrEmpty(settings.Id)) settings.Id = NewId();
         var list = Load();
-        list.RemoveAll(c => string.Equals(c.DisplayName, settings.DisplayName, StringComparison.OrdinalIgnoreCase));
+        list.RemoveAll(c =>
+            string.Equals(c.Id, settings.Id, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(c.DisplayName, settings.DisplayName, StringComparison.OrdinalIgnoreCase));
         list.Add(settings);
         Save(list);
         return list;
