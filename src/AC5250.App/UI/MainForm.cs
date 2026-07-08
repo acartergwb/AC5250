@@ -472,7 +472,33 @@ internal class MainForm : Form
             kpe.Handled = true;
         };
 
+        control.PasteRequested += text => PasteIntoSession(session, text);
+
         return control;
+    }
+
+    /// <summary>Type pasted clipboard text into the active field via the session's normal
+    /// input path. Tabs and newlines advance to the next field (so a spreadsheet row or a
+    /// multi-line block fills consecutive fields); only printable characters are typed.
+    /// Newlines are never turned into an Enter/AID, so a paste can never submit the screen.</summary>
+    private static void PasteIntoSession(TerminalSession session, string text)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+
+        // Normalise line endings, then split on tab OR newline into field-sized tokens.
+        text = text.Replace("\r\n", "\n").Replace('\r', '\n');
+        string[] tokens = text.Split('\t', '\n');
+
+        for (int i = 0; i < tokens.Length; i++)
+        {
+            var sb = new System.Text.StringBuilder(tokens[i].Length);
+            foreach (char ch in tokens[i])
+                if (ch >= ' ' && ch <= '~') sb.Append(ch);   // drop stray control chars
+
+            if (sb.Length > 0) session.TypeString(sb.ToString());
+            if (i < tokens.Length - 1)
+                session.HandleKeyAction(KeyAction.FromType(KeyActionType.Tab));
+        }
     }
 
     /// <summary>Replace a tab's content control (Home page or old terminal) with a new one.</summary>

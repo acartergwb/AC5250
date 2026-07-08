@@ -294,6 +294,26 @@ public class ScreenBuffer
         }
     }
 
+    /// <summary>The printable character currently DISPLAYED at a cell, matching what the
+    /// renderer paints: an attribute-byte cell and a hidden (non-display / password) field
+    /// both read as a blank, so copying screen text can never leak a masked password.
+    /// Non-printable EBCDIC collapses to a space. This is the single source of truth for
+    /// "what character is on screen here" — the renderer, the MCP text view, and the
+    /// clipboard copy all resolve a cell the same way.</summary>
+    public char DisplayCharAt(int row, int col)
+    {
+        if (IsFieldAttributeAt(row, col)) return ' ';
+
+        var field = GetFieldAt(row, col);
+        if (field is { Attribute.IsNonDisplay: true }) return ' ';
+
+        byte e = field != null
+            ? field.GetCharAt(field.GetIndexForPosition(row, col, Cols))
+            : GetCharAt(row, col);
+        char ch = Ebcdic.ToAscii(e);
+        return (ch < ' ' || ch > '~') ? ' ' : ch;
+    }
+
     public bool IsFieldAttributeAt(int row, int col)
     {
         int pos = row * Cols + col;
