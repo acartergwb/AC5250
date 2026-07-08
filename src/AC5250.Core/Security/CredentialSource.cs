@@ -53,10 +53,12 @@ public sealed class WindowsCredentialSource : ICredentialSource
 /// Credentials from environment variables injected by whoever spawns the process — the
 /// natural fit for a stdio MCP server the client launches, and the standard headless/CI
 /// secret path. Honors the "no credentials in a file" rule: nothing is read from or written
-/// to disk. Looks up a host-specific pair first, then a host-agnostic default:
+/// to disk. Keyed by the saved connection (matched to the session by endpoint), so a headless
+/// credential links to a connection just like on the desktop:
 /// <code>
-///   AC5250_&lt;HOST&gt;_USER / AC5250_&lt;HOST&gt;_PASSWORD   (HOST = host upper-cased, non-alphanumerics -> '_')
-///   AC5250_USER            / AC5250_PASSWORD               (fallback for the single-host case)
+///   AC5250_&lt;CONNECTION&gt;_USER / AC5250_&lt;CONNECTION&gt;_PASSWORD   (name upper-cased, non-alphanumerics -> '_')
+///   AC5250_&lt;CONNECTION&gt;_&lt;LABEL&gt;_USER / ..._PASSWORD          (a specific login)
+///   AC5250_USER               / AC5250_PASSWORD                  (fallback for the single-connection case)
 /// </code>
 /// </summary>
 public sealed class EnvironmentCredentialSource : ICredentialSource
@@ -65,29 +67,42 @@ public sealed class EnvironmentCredentialSource : ICredentialSource
 
     public (string User, string Password)? Get(ConnectionSettings settings, string? label = null)
     {
-        string host = settings.HostName;
+        string key = KeyFor(settings);
         if (!string.IsNullOrWhiteSpace(label))
         {
-            var (lu, lp) = VarNamesFor(host, label);
+            var (lu, lp) = VarNamesForKey(key, label);
             var byLabel = Pair(lu, lp);
             if (byLabel != null) return byLabel;
         }
-        var (userVar, pwVar) = VarNamesFor(host);
+        var (userVar, pwVar) = VarNamesForKey(key, null);
         return Pair(userVar, pwVar) ?? Pair(Prefix + "USER", Prefix + "PASSWORD");
     }
 
-    /// <summary>The env-var names for <paramref name="host"/> (and optional label), for help text.</summary>
-    public static (string UserVar, string PasswordVar) VarNamesFor(string host, string? label = null)
+    /// <summary>The env-var names for a session's connection (and optional label), for help text.</summary>
+    public static (string UserVar, string PasswordVar) VarNamesFor(ConnectionSettings settings, string? label = null)
+        => VarNamesForKey(KeyFor(settings), label);
+
+    private static (string UserVar, string PasswordVar) VarNamesForKey(string key, string? label)
     {
-        string key = Sanitize(host);
+        string k = Sanitize(key);
         if (!string.IsNullOrWhiteSpace(label))
-            key += "_" + Sanitize(label);
-        return ($"{Prefix}{key}_USER", $"{Prefix}{key}_PASSWORD");
+            k += "_" + Sanitize(label);
+        return ($"{Prefix}{k}_USER", $"{Prefix}{k}_PASSWORD");
+    }
+
+    // The identity to key env vars by: the session's saved-connection name when it maps to one
+    // (by id, or matched by endpoint for an ad-hoc/MCP session), else its own display name.
+    private static string KeyFor(ConnectionSettings s)
+    {
+        var matched = string.IsNullOrEmpty(s.Id)
+            ? ConnectionStore.FindByEndpoint(s.HostName, s.Port, s.DeviceName)
+            : null;
+        return (matched ?? s).DisplayName;
     }
 
     public IReadOnlyList<string> Labels(ConnectionSettings settings)
     {
-        string prefix = Prefix + Sanitize(settings.HostName) + "_";   // AC5250_<HOST>_
+        string prefix = Prefix + Sanitize(KeyFor(settings)) + "_";   // AC5250_<CONNECTION>_
         var labels = new List<string>();
         foreach (System.Collections.DictionaryEntry kv in Environment.GetEnvironmentVariables())
         {

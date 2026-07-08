@@ -197,7 +197,7 @@ public sealed class EmulatorController
             ? $" Available logins for this connection: {string.Join(", ", labels)}."
             : "";
         string forLabel = string.IsNullOrWhiteSpace(label) ? "" : $" (label '{label}')";
-        var (userVar, pwVar) = EnvironmentCredentialSource.VarNamesFor(host, label);
+        var (userVar, pwVar) = EnvironmentCredentialSource.VarNamesFor(settings, label);
         string envHint = $"set {userVar} and {pwVar} in this process's environment";
         return OperatingSystem.IsWindows()
             ? $"No saved credentials for '{settings.DisplayName}'{forLabel}. Add them in the emulator (Session > Manage Saved Credentials), or {envHint}.{avail}"
