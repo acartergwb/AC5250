@@ -4,6 +4,11 @@ namespace AC5250.Session;
 
 public class ConnectionSettings
 {
+    /// <summary>Stable identity for this saved connection, independent of its host or display
+    /// name. Assigned once (GUID "N" form) and persisted, so credentials keyed to it survive a
+    /// rename or host edit. Empty for ad-hoc/MCP connections that were never saved.</summary>
+    public string Id { get; set; } = "";
+
     public string HostName { get; set; } = "";
     public int Port { get; set; } = 23;
     public bool UseSsl { get; set; }

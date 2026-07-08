@@ -24,6 +24,8 @@ public static class CredentialStore
 
     private const string CredPrefix = "AC5250:";              // AC5250:{host}:{label}  (and legacy AC5250:{host})
     private const string DefaultMarkerPrefix = "AC5250$def:"; // AC5250$def:{host} -> user field holds default label
+    private const string ConnPrefix = "AC5250c:";             // AC5250c:{connId}:{label}
+    private const string ConnMarkerPrefix = "AC5250c$def:";   // AC5250c$def:{connId} -> user field holds default label
     private const uint CRED_TYPE_GENERIC = 1;
     private const uint CRED_PERSIST_LOCAL_MACHINE = 2;
 
@@ -32,6 +34,10 @@ public static class CredentialStore
     private static string Target(string host, string label) => $"{CredPrefix}{Host(host)}:{CleanLabel(label)}";
     private static string LegacyTarget(string host) => $"{CredPrefix}{Host(host)}";
     private static string MarkerTarget(string host) => $"{DefaultMarkerPrefix}{Host(host)}";
+
+    private static string Conn(string connId) => (connId ?? "").Trim();   // GUID "N" form: no colons
+    private static string ConnTarget(string connId, string label) => $"{ConnPrefix}{Conn(connId)}:{CleanLabel(label)}";
+    private static string ConnMarkerTarget(string connId) => $"{ConnMarkerPrefix}{Conn(connId)}";
 
     /// <summary>Add or overwrite the credential for a host under a label.</summary>
     public static void Save(string host, string label, string user, string password)
@@ -138,6 +144,161 @@ public static class CredentialStore
 
     public static void SetDefaultLabel(string host, string label)
         => Write(MarkerTarget(host), CleanLabel(label), ""); // label in user field, no password
+
+    // --- connection-scoped credentials (AC5250c:{connId}:{label}) -----------------------
+    // Credentials bound to a specific saved connection (by its stable id) rather than a bare
+    // host, so two connections to the same host can hold different logins and a saved login
+    // follows its connection through renames. The host-scoped API above is kept for the
+    // MCP/headless path (which connects by host) and as a sign-on fallback.
+
+    /// <summary>Add or overwrite the credential for a saved connection under a label.</summary>
+    public static void SaveForConnection(string connId, string label, string user, string password)
+        => Write(ConnTarget(connId, CleanLabel(label)), user, password);
+
+    /// <summary>Retrieve (user, password) for a connection. Null label resolves the default:
+    /// the marked default, else a "default" entry, else the sole entry if exactly one exists.</summary>
+    public static (string User, string Password)? GetForConnection(string connId, string? label = null)
+    {
+        if (!string.IsNullOrWhiteSpace(label))
+        {
+            var direct = Read(ConnTarget(connId, label));
+            if (direct != null) return direct;
+            foreach (var l in LabelsForConnection(connId))
+                if (string.Equals(l, label, StringComparison.OrdinalIgnoreCase))
+                {
+                    var r = Read(ConnTarget(connId, l));
+                    if (r != null) return r;
+                }
+            return null;
+        }
+
+        var def = GetDefaultLabelForConnection(connId);
+        if (def != null)
+        {
+            var r = Read(ConnTarget(connId, def));
+            if (r != null) return r;
+        }
+        return Read(ConnTarget(connId, DefaultLabel)) ?? SingleForConnectionOrNull(connId);
+    }
+
+    private static (string User, string Password)? SingleForConnectionOrNull(string connId)
+    {
+        var labels = LabelsForConnection(connId);
+        return labels.Count == 1 ? Read(ConnTarget(connId, labels[0])) : null;
+    }
+
+    public static void DeleteForConnection(string connId, string label)
+    {
+        string clean = CleanLabel(label);
+        CredDeleteW(ConnTarget(connId, clean), CRED_TYPE_GENERIC, 0);
+        if (string.Equals(GetDefaultLabelForConnection(connId), clean, StringComparison.OrdinalIgnoreCase))
+            CredDeleteW(ConnMarkerTarget(connId), CRED_TYPE_GENERIC, 0);
+    }
+
+    /// <summary>Remove every credential (and the default marker) bound to a connection —
+    /// used when the connection itself is deleted, so nothing is left orphaned in the vault.</summary>
+    public static void DeleteAllForConnection(string connId)
+    {
+        foreach (var l in LabelsForConnection(connId))
+            CredDeleteW(ConnTarget(connId, l), CRED_TYPE_GENERIC, 0);
+        CredDeleteW(ConnMarkerTarget(connId), CRED_TYPE_GENERIC, 0);
+    }
+
+    /// <summary>Labels stored for a connection (may be empty).</summary>
+    public static IReadOnlyList<string> LabelsForConnection(string connId)
+    {
+        var result = new List<string>();
+        foreach (var (target, _) in EnumerateUserNames(ConnPrefix + Conn(connId) + ":*"))
+        {
+            int lastColon = target.LastIndexOf(':');   // target = AC5250c:{connId}:{label}
+            if (lastColon > 0 && lastColon < target.Length - 1)
+                result.Add(target[(lastColon + 1)..]);
+        }
+        return result;
+    }
+
+    /// <summary>All stored (connId, label, user) triples across connections — no passwords.</summary>
+    public static IReadOnlyList<(string ConnId, string Label, string User)> ListForConnection()
+    {
+        var result = new List<(string, string, string)>();
+        foreach (var (target, user) in EnumerateUserNames(ConnPrefix + "*"))
+        {
+            string rest = target[ConnPrefix.Length..];       // {connId}:{label}
+            int colon = rest.IndexOf(':');
+            if (colon > 0 && colon < rest.Length - 1)
+                result.Add((rest[..colon], rest[(colon + 1)..], user));
+        }
+        return result;
+    }
+
+    public static string? GetDefaultLabelForConnection(string connId)
+    {
+        string? name = ReadUserName(ConnMarkerTarget(connId));
+        return string.IsNullOrEmpty(name) ? null : name;
+    }
+
+    public static void SetDefaultLabelForConnection(string connId, string label)
+        => Write(ConnMarkerTarget(connId), CleanLabel(label), ""); // label in user field, no password
+
+    // --- one-time migration: host-scoped -> connection-scoped ---------------------------
+    // Earlier versions stored credentials per host (AC5250:{host}:{label}); now they belong to a
+    // saved connection. Move each host credential onto every saved connection that uses that host
+    // (preserving the password and default marker), then delete the legacy host entries.
+
+    /// <summary>Migrate legacy host-scoped credentials onto matching saved connections, then
+    /// purge all legacy host entries. Idempotent — after the first run nothing is left to move.
+    /// Returns how many credentials were copied onto connections.</summary>
+    public static int MigrateHostCredentialsToConnections(IEnumerable<(string Id, string Host)> connections)
+    {
+        // Snapshot the legacy host credentials (host, label) currently in the vault.
+        var hostCreds = new List<(string Host, string Label)>();
+        foreach (var (target, _) in EnumerateUserNames(CredPrefix + "*"))   // AC5250:{host}:{label} or bare AC5250:{host}
+        {
+            string rest = target[CredPrefix.Length..];
+            int colon = rest.IndexOf(':');
+            hostCreds.Add(colon < 0 ? (rest, DefaultLabel) : (rest[..colon], rest[(colon + 1)..]));
+        }
+        if (hostCreds.Count == 0) return 0;
+
+        // Group saved-connection ids by host.
+        var connsByHost = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (id, host) in connections)
+        {
+            if (string.IsNullOrEmpty(id)) continue;
+            string h = Host(host);
+            if (!connsByHost.TryGetValue(h, out var ids)) connsByHost[h] = ids = new();
+            ids.Add(id);
+        }
+
+        int moved = 0;
+        foreach (var (host, label) in hostCreds)
+        {
+            var pair = Get(host, label);
+            if (pair is null) continue;
+            bool isDefault = string.Equals(GetDefaultLabel(host), label, StringComparison.OrdinalIgnoreCase);
+            if (!connsByHost.TryGetValue(Host(host), out var connIds)) continue;
+
+            foreach (var connId in connIds)
+            {
+                if (GetForConnection(connId, label) is not null) continue;   // don't clobber an existing entry
+                SaveForConnection(connId, label, pair.Value.User, pair.Value.Password);
+                if (isDefault) SetDefaultLabelForConnection(connId, label);
+                moved++;
+            }
+        }
+
+        PurgeLegacyHostCredentials();
+        return moved;
+    }
+
+    /// <summary>Delete every legacy host-scoped credential and default marker from the vault.</summary>
+    public static void PurgeLegacyHostCredentials()
+    {
+        foreach (var (target, _) in EnumerateUserNames(CredPrefix + "*"))          // AC5250:{host}...
+            CredDeleteW(target, CRED_TYPE_GENERIC, 0);
+        foreach (var (target, _) in EnumerateUserNames(DefaultMarkerPrefix + "*")) // AC5250$def:{host}
+            CredDeleteW(target, CRED_TYPE_GENERIC, 0);
+    }
 
     // --- P/Invoke helpers ---
 

@@ -164,9 +164,9 @@ public sealed class EmulatorController
 
         if (_credentials is null)
             throw new McpException("Credential sign-on is not available in this host.");
-        var creds = _credentials.Get(s.Settings.HostName, credentialLabel);
+        var creds = _credentials.Get(s.Settings, credentialLabel);
         if (creds is null)
-            throw new McpException(NoCredentialsMessage(s.Settings.HostName, credentialLabel));
+            throw new McpException(NoCredentialsMessage(s.Settings, credentialLabel));
 
         var (userIdx, pwIdx) = _marshal.Invoke(() => FindSignOnFields(s));
         if (userIdx < 0 || pwIdx < 0)
@@ -189,17 +189,18 @@ public sealed class EmulatorController
     /// <summary>Explain where to put credentials for a host/label, tailored to the platform:
     /// the desktop dialog on Windows, environment variables everywhere else. Lists the labels
     /// that DO exist for the host so the caller can pick a valid one.</summary>
-    private string NoCredentialsMessage(string host, string? label)
+    private string NoCredentialsMessage(ConnectionSettings settings, string? label)
     {
-        IReadOnlyList<string> labels = _credentials?.Labels(host) ?? Array.Empty<string>();
+        string host = settings.HostName;
+        IReadOnlyList<string> labels = _credentials?.Labels(settings) ?? Array.Empty<string>();
         string avail = labels.Count > 0
-            ? $" Available labels for this host: {string.Join(", ", labels)}."
+            ? $" Available logins for this connection: {string.Join(", ", labels)}."
             : "";
         string forLabel = string.IsNullOrWhiteSpace(label) ? "" : $" (label '{label}')";
-        var (userVar, pwVar) = EnvironmentCredentialSource.VarNamesFor(host, label);
+        var (userVar, pwVar) = EnvironmentCredentialSource.VarNamesFor(settings, label);
         string envHint = $"set {userVar} and {pwVar} in this process's environment";
         return OperatingSystem.IsWindows()
-            ? $"No saved credentials for host '{host}'{forLabel}. Add them in the emulator (Session > Manage Saved Credentials), or {envHint}.{avail}"
+            ? $"No saved credentials for '{settings.DisplayName}'{forLabel}. Add them in the emulator (Session > Manage Saved Credentials), or {envHint}.{avail}"
             : $"No saved credentials for host '{host}'{forLabel}. On this platform, {envHint}.{avail}";
     }
 
