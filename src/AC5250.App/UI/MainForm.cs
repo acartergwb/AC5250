@@ -84,6 +84,7 @@ internal class MainForm : Form
         _tabBar.TabCloseClicked += OnTabClose;
         _tabBar.NewTabClicked += (_, _) => OpenHomeTab();
         _tabBar.TabDetached += OnTabDetached;
+        _tabBar.WindowDragReleased += pt => _shell.TryDockSingleTab(this, pt);
 
         _captionButtons = new CaptionButtons(this) { Dock = DockStyle.Right };
         _captionBar = new Panel { Dock = DockStyle.Top, Height = 34, BackColor = DarkTheme.Background };
@@ -546,10 +547,6 @@ internal class MainForm : Form
             _shell.DropDetachedTab(this, DetachTab(ctx), screenLocation);
     }
 
-    /// <summary>True if the screen point is over this window's tab strip (used to dock a
-    /// dragged-out tab into this window rather than spawning a new one).</summary>
-    internal bool TabStripScreenContains(Point screen)
-        => _tabBar.RectangleToScreen(_tabBar.ClientRectangle).Contains(screen);
 
     /// <summary>Fully close a tab: tear down its session (if any) and remove the tab.</summary>
     private void CloseTab(TabContext ctx)
@@ -574,7 +571,14 @@ internal class MainForm : Form
         _tabs.Remove(ctx);
         if (idx >= 0) _tabBar.RemoveTabAt(idx);   // fires OnTabChanged for the new selection
         if (ReferenceEquals(_activeTab, ctx)) _activeTab = null;
-        if (_tabs.Count == 0) OpenHomeTab();      // never leave the window tab-less
+        if (_tabs.Count == 0)
+        {
+            // Closing the last tab closes the window — unless it's the last window, which
+            // instead falls back to the Home page so the app stays open. Defer the Close so the
+            // current tab-close / mouse handler unwinds before the form (and tab bar) dispose.
+            if (_shell.WindowCount > 1) BeginInvoke(new Action(Close));
+            else OpenHomeTab();
+        }
     }
 
     /// <summary>Remove a tab from THIS window without tearing down its session or content —
@@ -586,9 +590,14 @@ internal class MainForm : Form
         _tabs.Remove(ctx);
         if (idx >= 0) _tabBar.RemoveTabAt(idx);
         if (ReferenceEquals(_activeTab, ctx)) _activeTab = null;
-        if (_tabs.Count == 0) OpenHomeTab();            // never leave the window tab-less
+        // No Home fallback here: multi-tab tear-out leaves other tabs; single-tab dock closes
+        // the now-empty source window (the shell handles that).
         return ctx;
     }
+
+    /// <summary>Detach this window's only tab — used when merging a single-tab window into
+    /// another. The source window is expected to close afterwards.</summary>
+    internal TabContext? DetachSingleTab() => _tabs.Count > 0 ? DetachTab(_tabs[0]) : null;
 
     /// <summary>Take a tab detached from another window into this one and select it.</summary>
     internal void AdoptTab(TabContext ctx)

@@ -37,6 +37,20 @@ internal sealed class AppShell : ApplicationContext
     public bool McpRunning => _mcpHost != null;
     public McpHost? McpHost => _mcpHost;
     public MainForm? ActiveWindow { get; private set; }
+    public int WindowCount => _windows.Count;
+
+    /// <summary>Another window (not <paramref name="source"/>) whose bounds contain the screen
+    /// point — the target when a dragged tab is dropped onto it.</summary>
+    private MainForm? OtherWindowAt(MainForm source, Point screen)
+    {
+        // Iterate front-to-back so an overlapping top window wins.
+        for (int i = _windows.Count - 1; i >= 0; i--)
+        {
+            var w = _windows[i];
+            if (!ReferenceEquals(w, source) && w.Bounds.Contains(screen)) return w;
+        }
+        return null;
+    }
 
     public AppShell(McpStartupOptions? mcpStartup)
     {
@@ -92,17 +106,30 @@ internal sealed class AppShell : ApplicationContext
     /// the drop point. The session never leaves the shared SessionManager.</summary>
     public void DropDetachedTab(MainForm source, MainForm.TabContext tab, Point screenLocation)
     {
-        foreach (var w in _windows)
+        if (OtherWindowAt(source, screenLocation) is { } target)
         {
-            if (!ReferenceEquals(w, source) && w.TabStripScreenContains(screenLocation))
-            {
-                w.AdoptTab(tab);
-                w.Activate();
-                ActiveWindow = w;
-                return;
-            }
+            target.AdoptTab(tab);
+            target.Activate();
+            ActiveWindow = target;
         }
-        OpenWindowWithTab(tab, screenLocation);
+        else
+        {
+            OpenWindowWithTab(tab, screenLocation);
+        }
+    }
+
+    /// <summary>A single-tab window was dragged and released: if dropped over another window,
+    /// merge its tab into that window and close the (now-empty) source. Otherwise the window
+    /// was just moved and stays as-is.</summary>
+    public void TryDockSingleTab(MainForm source, Point screenLocation)
+    {
+        if (OtherWindowAt(source, screenLocation) is not { } target) return;   // just a move
+        if (source.DetachSingleTab() is not { } tab) return;
+        target.AdoptTab(tab);
+        target.Activate();
+        ActiveWindow = target;
+        // Defer so the tab bar's mouse-up handler in the source unwinds before it disposes.
+        source.BeginInvoke(new Action(source.Close));
     }
 
     private void OnWindowClosed(MainForm w)

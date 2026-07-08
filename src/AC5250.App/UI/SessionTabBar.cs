@@ -29,6 +29,8 @@ public class SessionTabBar : Control
     private int _grabDX;
     private int _dragPointerX;
     private bool _detaching;
+    private bool _movingWindow;                 // dragging the ONLY tab moves the whole window
+    private Point _winGrab;                      // cursor offset within the window when grabbed
     private TabDragGhost? _ghost;               // floating preview shown while tearing a tab out
     private readonly System.Windows.Forms.Timer _animTimer;
     private const float EaseFactor = 0.32f;    // per-tick easing toward the target slot
@@ -79,6 +81,10 @@ public class SessionTabBar : Control
     /// <summary>Raised when a tab is dragged out of the bar (to tear it into a new window):
     /// (tab index, screen location of the drop).</summary>
     public event Action<int, Point>? TabDetached;
+
+    /// <summary>Raised when a single-tab window was moved by dragging its (only) tab and
+    /// released — carries the drop screen point so the shell can merge into another window.</summary>
+    public event Action<Point>? WindowDragReleased;
 
     public SessionTabBar()
     {
@@ -362,9 +368,18 @@ public class SessionTabBar : Control
             if (GetTabRect(i).Contains(e.Location))
             {
                 SelectedIndex = i;          // select on press so click-to-select still works
-                _pressIndex = i;            // and mark it as a candidate for a reorder drag
-                _pressX = e.X;
-                _grabDX = e.X - SlotX(i);   // where inside the tab it was grabbed
+                if (_tabs.Count == 1 && FindForm() is { } f)
+                {
+                    // A window with one tab: dragging that tab moves the whole window (Chrome).
+                    _movingWindow = true;
+                    _winGrab = new Point(Cursor.Position.X - f.Left, Cursor.Position.Y - f.Top);
+                }
+                else
+                {
+                    _pressIndex = i;            // candidate for a reorder / tear-out drag
+                    _pressX = e.X;
+                    _grabDX = e.X - SlotX(i);   // where inside the tab it was grabbed
+                }
                 return;
             }
         }
@@ -381,6 +396,17 @@ public class SessionTabBar : Control
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
+
+        // Single-tab window: the tab drags the whole window (un-maximize first, like Chrome).
+        if (_movingWindow && (e.Button & MouseButtons.Left) != 0)
+        {
+            if (FindForm() is { } f)
+            {
+                if (f.WindowState == FormWindowState.Maximized) f.WindowState = FormWindowState.Normal;
+                f.Location = new Point(Cursor.Position.X - _winGrab.X, Cursor.Position.Y - _winGrab.Y);
+            }
+            return;
+        }
 
         // A held press on a tab that moves far enough becomes a live reorder drag.
         if (_pressIndex >= 0 && (e.Button & MouseButtons.Left) != 0)
@@ -454,6 +480,15 @@ public class SessionTabBar : Control
         base.OnMouseUp(e);
         if (e.Button != MouseButtons.Left) { ResetPress(); return; }
 
+        // Single-tab window-move released: let the shell merge into another window if dropped
+        // over one; otherwise the window simply stays where it was dragged.
+        if (_movingWindow)
+        {
+            _movingWindow = false;
+            WindowDragReleased?.Invoke(PointToScreen(e.Location));
+            return;
+        }
+
         // Drag ended away from the strip (off the window, or dragged well below it) with more
         // than one tab open → tear this tab out into a new window at the drop point.
         if (_dragging && _pressIndex >= 0 && _tabs.Count > 1)
@@ -492,6 +527,7 @@ public class SessionTabBar : Control
         _pressIndex = -1;
         _dragging = false;
         _detaching = false;
+        _movingWindow = false;
         _pressedNewTab = false;
         _pressedCloseIndex = -1;
         HideGhost();
