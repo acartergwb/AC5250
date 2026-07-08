@@ -518,13 +518,19 @@ internal class MainForm : Form
         if (_tabBar.GetTabTag(index) is TabContext ctx) CloseTab(ctx);
     }
 
-    // A tab dragged out of the bar: move it (session + live control) into a fresh window at
-    // the drop point. The session stays in the shared SessionManager, so MCP keeps driving it.
+    // A tab dragged out of the bar: hand it to the shell, which docks it into another window
+    // if dropped over that window's tab strip, otherwise opens a new window at the drop point.
+    // The session stays in the shared SessionManager, so MCP keeps driving it.
     private void OnTabDetached(int index, Point screenLocation)
     {
         if (_tabBar.GetTabTag(index) is TabContext ctx)
-            _shell.OpenWindowWithTab(DetachTab(ctx), screenLocation);
+            _shell.DropDetachedTab(this, DetachTab(ctx), screenLocation);
     }
+
+    /// <summary>True if the screen point is over this window's tab strip (used to dock a
+    /// dragged-out tab into this window rather than spawning a new one).</summary>
+    internal bool TabStripScreenContains(Point screen)
+        => _tabBar.RectangleToScreen(_tabBar.ClientRectangle).Contains(screen);
 
     /// <summary>Fully close a tab: tear down its session (if any) and remove the tab.</summary>
     private void CloseTab(TabContext ctx)

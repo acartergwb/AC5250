@@ -87,6 +87,24 @@ internal sealed class AppShell : ApplicationContext
         return w;
     }
 
+    /// <summary>Place a tab torn out of <paramref name="source"/>: if dropped over another
+    /// window's tab strip, dock it there (Chrome-style rejoin); otherwise open a new window at
+    /// the drop point. The session never leaves the shared SessionManager.</summary>
+    public void DropDetachedTab(MainForm source, MainForm.TabContext tab, Point screenLocation)
+    {
+        foreach (var w in _windows)
+        {
+            if (!ReferenceEquals(w, source) && w.TabStripScreenContains(screenLocation))
+            {
+                w.AdoptTab(tab);
+                w.Activate();
+                ActiveWindow = w;
+                return;
+            }
+        }
+        OpenWindowWithTab(tab, screenLocation);
+    }
+
     private void OnWindowClosed(MainForm w)
     {
         _windows.Remove(w);

@@ -184,12 +184,14 @@ public class SessionTabBar : Control
         {
             if (_dragging && i == _pressIndex)
             {
-                // Grabbed tab tracks the cursor (clamped to the strip); no easing.
+                // While tearing out, the tab lives only in the floating ghost — don't position
+                // or paint it in the strip. While reordering in-strip, it tracks the cursor.
+                if (_detaching) { moving = true; continue; }
                 _tabs[i].AnimX = Math.Clamp(_dragPointerX - _grabDX, 4f, Math.Max(4, Width - tabWidth - 4));
                 moving = true;
                 continue;
             }
-            float target = SlotX(i);
+            float target = SlotX(VisualSlot(i));
             float cur = _tabs[i].AnimX;
             if (Math.Abs(target - cur) < 0.5f) _tabs[i].AnimX = target;
             else { _tabs[i].AnimX = cur + (target - cur) * EaseFactor; moving = true; }
@@ -198,6 +200,9 @@ public class SessionTabBar : Control
         Invalidate();
         if (!_dragging && !moving) _animTimer.Stop();
     }
+
+    // While a tab is torn out, the tabs after it collapse left as if it were already gone.
+    private int VisualSlot(int i) => (_detaching && _dragging && i > _pressIndex) ? i - 1 : i;
 
     private Rectangle GetCloseRect(int index)
     {
@@ -233,13 +238,14 @@ public class SessionTabBar : Control
         EnsureAnimInit();
 
         // Paint non-dragged tabs at their eased positions, then the grabbed tab on top so it
-        // floats over its neighbours while they slide out of the way.
+        // floats over its neighbours while they slide out of the way. While tearing out, the
+        // grabbed tab isn't drawn in the strip at all — the floating ghost represents it.
         for (int i = 0; i < _tabs.Count; i++)
             if (!(_dragging && i == _pressIndex))
-                DrawTab(g, i, PaintRect(i), lifted: false);
+                DrawTab(g, i, PaintRect(i));
 
-        if (_dragging && _pressIndex >= 0 && _pressIndex < _tabs.Count)
-            DrawTab(g, _pressIndex, PaintRect(_pressIndex), lifted: _detaching);
+        if (_dragging && !_detaching && _pressIndex >= 0 && _pressIndex < _tabs.Count)
+            DrawTab(g, _pressIndex, PaintRect(_pressIndex));
 
         // "+" new-tab button
         var newRect = GetNewTabRect();
@@ -257,24 +263,16 @@ public class SessionTabBar : Control
         g.DrawLine(plusPen, px, py - arm, px, py + arm);
     }
 
-    private void DrawTab(Graphics g, int i, Rectangle rect, bool lifted)
+    private void DrawTab(Graphics g, int i, Rectangle rect)
     {
         bool isSelected = i == _selectedIndex;
         bool isHover = i == _hoverIndex;
         bool isDragged = _dragging && i == _pressIndex;
 
-        if (lifted)
-        {
-            // Tear-out affordance: raise the tab and drop a soft shadow so it clearly lifts off.
-            rect.Y -= 5;
-            using var shadow = new SolidBrush(Color.FromArgb(110, 0, 0, 0));
-            FillRoundedRect(g, shadow, new Rectangle(rect.X + 2, rect.Y + 5, rect.Width - 2, rect.Height - 2), 6);
-        }
-
         if (isSelected)
         {
             using var brush = new SolidBrush(DarkTheme.SurfaceLight);
-            FillRoundedRect(g, brush, new Rectangle(rect.X + 1, rect.Y + 2, rect.Width - 2, rect.Height - 2), 6, roundBottom: lifted);
+            FillRoundedRect(g, brush, new Rectangle(rect.X + 1, rect.Y + 2, rect.Width - 2, rect.Height - 2), 6, roundBottom: false);
             using var accentPen = new Pen(DarkTheme.Accent, 2);
             g.DrawLine(accentPen, rect.X + 6, rect.Y + 2, rect.Right - 6, rect.Y + 2);
         }
