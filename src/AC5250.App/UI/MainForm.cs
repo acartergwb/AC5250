@@ -2,11 +2,12 @@ using System.Runtime.InteropServices;
 using AC5250.Hosting;
 using AC5250.Input;
 using AC5250.Rendering;
+using AC5250.Security;
 using AC5250.Session;
 
 namespace AC5250.UI;
 
-public class MainForm : Form
+internal class MainForm : Form
 {
     [DllImport("dwmapi.dll", PreserveSig = true)]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
@@ -15,8 +16,16 @@ public class MainForm : Form
     private const int DWMWA_CAPTION_COLOR = 35;
     private const int DWMWA_BORDER_COLOR = 34;
 
-    private readonly SessionManager _sessionManager = new();
+    // Custom title bar: keep the native sizing frame (thin border + native resize/snap/maximize)
+    // but reclaim the caption area for our own tab strip via WM_NCCALCSIZE. No client padding,
+    // so there's no visible gray border.
+    [DllImport("user32.dll")] private static extern IntPtr DefWindowProc(IntPtr hWnd, int msg, IntPtr w, IntPtr l);
+
+    private readonly AppShell _shell;
+    private readonly SessionManager _sessionManager;
     private readonly SessionTabBar _tabBar;
+    private Panel _captionBar = null!;
+    private CaptionButtons _captionButtons = null!;
     private readonly Panel _terminalPanel;
     private readonly MenuStrip _menu;
 
@@ -32,22 +41,22 @@ public class MainForm : Form
     private ToolStripMenuItem? _startMcpItem;
     private ToolStripMenuItem? _stopMcpItem;
 
-    // MCP in-process host (started on demand via the Tools menu, or at launch with --mcp).
-    private const int McpPort = 8250;
-    private McpHost? _mcpHost;
-    private SynchronizationContext? _uiContext;
+    // The MCP host, SessionManager, and settings live in the shared AppShell so an MCP client
+    // drives sessions across every window. This form is one view onto that shared state.
     private readonly McpStartupOptions? _mcpStartup;
-    private int EffectivePort => _mcpStartup?.Port ?? McpPort;
 
     private bool _uppercaseInput = true;
     private ToolStripMenuItem? _uppercaseMenuItem;
 
-    private readonly AppSettings _settings = AppSettingsStore.Load();
+    private readonly AppSettings _settings;
     private ToolStripMenuItem? _mcpStartupMenuItem;
 
-    public MainForm(McpStartupOptions? mcpStartup = null)
+    public MainForm(AppShell shell)
     {
-        _mcpStartup = mcpStartup;
+        _shell = shell;
+        _sessionManager = shell.Sessions;
+        _settings = shell.Settings;
+        _mcpStartup = shell.McpStartup;
 
         Text = "AC5250";
         if (LoadAppIcon() is { } appIcon) Icon = appIcon;
@@ -58,17 +67,29 @@ public class MainForm : Form
         ForeColor = DarkTheme.TextPrimary;
         Font = DarkTheme.UIFont;
 
-        ApplyDarkTitleBar();
+        // Chrome-style custom frame: the native title bar is removed in WndProc (WM_NCCALCSIZE)
+        // while the native sizing frame is kept, so the caption strip (tabs + window buttons)
+        // sits at the very top with the menu below and the terminal beneath — and there's no
+        // gray client border. FormBorderStyle stays the default Sizable.
 
         // Menu
         _menu = CreateMenu();
         MainMenuStrip = _menu;
 
-        // Tab bar
-        _tabBar = new SessionTabBar();
+        // Tab bar — fills the caption strip, left of the window buttons.
+        _tabBar = new SessionTabBar { Dock = DockStyle.Fill };
         _tabBar.SelectedIndexChanged += OnTabChanged;
         _tabBar.TabCloseClicked += OnTabClose;
         _tabBar.NewTabClicked += (_, _) => OpenHomeTab();
+        _tabBar.TabDetached += OnTabDetached;
+        _tabBar.WindowDragReleased += pt => _shell.TryDockSingleTab(this, pt);
+        _tabBar.TabDragOver += pt => _shell.UpdateDropTarget(this, pt);
+        _tabBar.TabDragEnded += () => _shell.ClearDropTarget();
+
+        _captionButtons = new CaptionButtons(this) { Dock = DockStyle.Right };
+        _captionBar = new Panel { Dock = DockStyle.Top, Height = 34, BackColor = DarkTheme.Background };
+        _captionBar.Controls.Add(_captionButtons);   // Right
+        _captionBar.Controls.Add(_tabBar);           // Fill (added last so it takes the remainder)
 
         // Terminal panel
         _terminalPanel = new Panel
@@ -78,27 +99,27 @@ public class MainForm : Form
             Padding = new Padding(2, 0, 2, 2),
         };
 
-        // Add in correct order (Fill must be added first)
+        // Add order: Fill first, then Top controls inner→outer (menu below the caption strip,
+        // caption strip at the very top).
         Controls.Add(_terminalPanel);
-        Controls.Add(_tabBar);
         Controls.Add(_menu);
+        Controls.Add(_captionBar);
 
-        // Wire session manager events. SessionAdded also fires for sessions created by the
-        // MCP host (Claude), so the UI must build a tab/control for those too.
-        _sessionManager.SessionAdded += OnSessionAdded;
-        _sessionManager.SessionRemoved += OnSessionRemoved;
+        // SessionManager events are handled centrally by the AppShell, which routes each
+        // session to the owning window (this form exposes PlaceSessionTab/Handle* for it).
 
         KeyPreview = true;
     }
 
     /// <summary>Open a new Home tab (the connection chooser). Used by "+", Session ▸ New
     /// Session, and whenever the window would otherwise have no tabs.</summary>
-    private void OpenHomeTab()
+    internal void OpenHomeTab()
     {
         var welcome = new WelcomePanel { Dock = DockStyle.Fill, Visible = false };
         var ctx = new TabContext { Content = welcome };
         welcome.ConnectClicked += (_, _) => StartConnectFlow(ctx);           // "+ New connection" / Connect
-        welcome.LaunchProfile += (_, settings) => StartSessionInTab(ctx, settings); // quick-launch a saved profile
+        welcome.LaunchProfile += (_, settings) => StartSessionInTab(ctx, settings); // launch a saved connection (no sign-on)
+        welcome.QuickSignOn += (settings, label) => StartQuickSignOn(ctx, settings, label); // connect + sign on
         _terminalPanel.Controls.Add(welcome);
         _tabs.Add(ctx);
         _tabBar.AddTab("Home", ctx);   // selects the tab -> OnTabChanged -> ActivateTab
@@ -136,6 +157,7 @@ public class MainForm : Form
 
         var sessionMenu = CreateMenuItem("&Session");
         sessionMenu.DropDownItems.Add(CreateMenuItem("&New Session", Keys.Control | Keys.T, (_, _) => OpenHomeTab()));
+        sessionMenu.DropDownItems.Add(CreateMenuItem("New &Window", Keys.Control | Keys.N, (_, _) => _shell.OpenWindow()));
         sessionMenu.DropDownItems.Add(CreateMenuItem("&Close Session", Keys.Control | Keys.W, OnCloseSession));
         sessionMenu.DropDownItems.Add(new ToolStripSeparator());
         sessionMenu.DropDownItems.Add(CreateMenuItem("Sign &On (saved credentials)", onClick: OnSignOn));
@@ -202,12 +224,22 @@ public class MainForm : Form
         else StartConnectFlow(ctx);                                              // Home tab -> dialog
     }
 
-    /// <summary>Bring a connection up inside the given tab, replacing its current content
-    /// (a Home page, or a previous disconnected session).</summary>
-    private async void StartSessionInTab(TabContext ctx, ConnectionSettings settings)
+    /// <summary>Launch a saved connection from the Home page's Quick Launch column: connect,
+    /// then sign on with the credential bound to that connection once the sign-on screen is up.</summary>
+    private void StartQuickSignOn(TabContext ctx, ConnectionSettings settings, string label)
     {
-        _uiContext ??= SynchronizationContext.Current;
+        (string User, string Password)? creds = OperatingSystem.IsWindows()
+            ? CredentialStore.GetForConnection(settings.Id, label)
+            : null;
+        StartSessionInTab(ctx, settings, creds);
+    }
 
+    /// <summary>Bring a connection up inside the given tab, replacing its current content
+    /// (a Home page, or a previous disconnected session). When <paramref name="autoSignOn"/> is
+    /// supplied, the sign-on screen is filled and submitted automatically once it appears.</summary>
+    private async void StartSessionInTab(TabContext ctx, ConnectionSettings settings,
+        (string User, string Password)? autoSignOn = null)
+    {
         // If the tab already holds a (disconnected) session, tear it down first — but null the
         // ref so OnSessionRemoved doesn't delete the tab; we're reusing it.
         if (ctx.Session is { } dead)
@@ -216,12 +248,54 @@ public class MainForm : Form
             _sessionManager.CloseSession(dead);
         }
 
-        _pendingTab = ctx;   // OnSessionAdded places the new terminal control into this tab
-        var session = _sessionManager.CreateSession(settings, _uiContext);
+        _pendingTab = ctx;                 // PlaceSessionTab puts the new terminal into this tab
+        _shell.SetPendingWindow(this);     // and this window owns the session
+        var session = _sessionManager.CreateSession(settings, _shell.UiContext);
         session.UppercaseInput = _uppercaseInput;
 
         try { await session.ConnectAsync(); }
-        catch { /* ConnectionClosed already fired → the tab shows [Closed] + a toast */ }
+        catch { return; /* ConnectionClosed already fired → the tab shows [Closed] + a toast */ }
+
+        if (autoSignOn is { } c)
+            _ = AutoSignOnAsync(session, c.User, c.Password);
+    }
+
+    /// <summary>Wait (up to a bounded time) for a fillable sign-on screen to arrive after
+    /// connecting, then fill the user/password fields and press Enter. Runs on the UI thread
+    /// (awaits resume on the WinForms context). The password lives only in this local and the
+    /// hidden field — it is never logged.</summary>
+    private static async Task AutoSignOnAsync(TerminalSession session, string user, string password)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < 20_000)
+        {
+            if (!session.IsConnected) return;
+            if (!session.Screen.InputInhibited && TryFindSignOnFields(session, out int userIdx, out int pwIdx))
+            {
+                if (session.SetFieldValue(userIdx, user, true) &&
+                    session.SetFieldValue(pwIdx, password, true) &&
+                    AC5250.Mcp.KeyNames.TryParse("Enter", out var enter))
+                    session.HandleKeyAction(enter);
+                return;
+            }
+            await Task.Delay(200);
+        }
+    }
+
+    /// <summary>Locate the sign-on user field (first visible non-bypass input) and password
+    /// field (first non-display input) by index into the current screen's field list.</summary>
+    private static bool TryFindSignOnFields(TerminalSession session, out int userIdx, out int pwIdx)
+    {
+        userIdx = -1; pwIdx = -1;
+        var fields = session.Screen.Fields;
+        for (int i = 0; i < fields.Count; i++)
+        {
+            var a = fields[i].Attribute;
+            if (a.IsBypass) continue;
+            if (a.IsNonDisplay) { if (pwIdx < 0) pwIdx = i; }
+            else if (userIdx < 0) userIdx = i;
+        }
+        return userIdx >= 0 && pwIdx >= 0;
     }
 
     // File ▸ Disconnect drops the socket but KEEPS the tab (as [Closed]) so it can be
@@ -237,63 +311,29 @@ public class MainForm : Form
         if (_activeTab is { } ctx) CloseTab(ctx);
     }
 
-    protected override void OnLoad(EventArgs e)
-    {
-        base.OnLoad(e);
-        // Capture the WinForms synchronization context; sessions and the MCP host
-        // use it to marshal host-driven parsing and MCP calls onto this thread.
-        _uiContext = SynchronizationContext.Current;
-
-        // Start on the connection chooser.
-        OpenHomeTab();
-
-        // Start the MCP server automatically unless the user turned it off, so an MCP
-        // client (Claude) can connect without any manual step. --mcp forces it on too.
-        if (_mcpStartup?.AutoStart == true || _settings.StartMcpOnStartup)
-            _ = StartMcpAsync();
-    }
+    // The AppShell opens the initial tab after Show() (a Home tab for a fresh window, or an
+    // adopted tab for a dragged-out session) and owns MCP auto-start, so OnLoad is a no-op.
 
     private async void OnStartMcp(object? sender, EventArgs e)
     {
-        if (_mcpHost != null) { OnMcpInfo(sender, e); return; }
+        if (_shell.McpRunning) { OnMcpInfo(sender, e); return; }
 
-        if (await StartMcpAsync() && _mcpHost != null)
+        if (await _shell.StartMcpAsync() && _shell.McpHost is { } host)
         {
-            using var dlg = new McpInfoDialog(_mcpHost);
+            using var dlg = new McpInfoDialog(host);
             dlg.ShowDialog(this);
-        }
-    }
-
-    private async Task<bool> StartMcpAsync()
-    {
-        _uiContext ??= SynchronizationContext.Current;
-        try
-        {
-            var host = new McpHost(_sessionManager, this, _uiContext!, EffectivePort);
-            await host.StartAsync();
-            _mcpHost = host;
-            return true;
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(
-                $"Could not start the MCP server on 127.0.0.1:{EffectivePort}.\n\n{ex.Message}",
-                "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return false;
         }
     }
 
     private async void OnStopMcp(object? sender, EventArgs e)
     {
-        if (_mcpHost == null)
+        if (!_shell.McpRunning)
         {
             MessageBox.Show("MCP server is not running.", "AC5250",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
-        var host = _mcpHost;
-        _mcpHost = null;
-        await host.DisposeAsync();
+        await _shell.StopMcpAsync();
         MessageBox.Show("MCP server stopped.", "AC5250",
             MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
@@ -312,9 +352,9 @@ public class MainForm : Form
         dlg.ShowDialog(this);
     }
 
-    // Manual counterpart to the MCP `signon` tool: fill the sign-on screen from the
-    // saved credentials for the active session's host and submit. The password is read
-    // from Windows Credential Manager and only ever written into the (hidden) field.
+    // Manual counterpart to the MCP `signon` tool: fill the active session's sign-on screen
+    // from a saved credential and submit. The password is read from Windows Credential Manager
+    // and only ever written into the (hidden) field.
     private void OnSignOn(object? sender, EventArgs e)
     {
         var s = _sessionManager.ActiveSession;
@@ -323,41 +363,11 @@ public class MainForm : Form
             MessageBox.Show("No active session.", "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
-        string host = s.Settings.HostName;
-        var labels = AC5250.Security.CredentialStore.Labels(host);
-        if (labels.Count == 0)
-        {
-            MessageBox.Show(
-                $"No saved credentials for host '{host}'.\nAdd them via Session > Manage Saved Credentials.",
-                "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
 
-        // With more than one login for the host, ask which; otherwise use the default/only one.
-        string? label = null;
-        if (labels.Count > 1)
-        {
-            label = CredentialPicker.Choose(this, host, labels);
-            if (label == null) return; // cancelled
-        }
-        var creds = AC5250.Security.CredentialStore.Get(host, label);
-        if (creds is null)
-        {
-            MessageBox.Show($"Could not read the saved credential for '{host}'.",
-                "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
+        var creds = ResolveSignOnCredential(s);
+        if (creds is null) return;   // already messaged the user, or they cancelled the picker
 
-        var fields = s.Screen.Fields;
-        int userIdx = -1, pwIdx = -1;
-        for (int i = 0; i < fields.Count; i++)
-        {
-            var a = fields[i].Attribute;
-            if (a.IsBypass) continue;
-            if (a.IsNonDisplay) { if (pwIdx < 0) pwIdx = i; }
-            else if (userIdx < 0) userIdx = i;
-        }
-        if (userIdx < 0 || pwIdx < 0)
+        if (!TryFindSignOnFields(s, out int userIdx, out int pwIdx))
         {
             MessageBox.Show("This screen isn't a sign-on prompt (no user + hidden password field found).",
                 "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -374,6 +384,38 @@ public class MainForm : Form
             s.HandleKeyAction(enter);
     }
 
+    /// <summary>Pick the saved credential to sign on with for the active session. Credentials are
+    /// bound to a saved connection: the session's own connection id, or — for an ad-hoc connection
+    /// to a known host — a saved connection matched by endpoint. Prompts when the connection has
+    /// more than one login. Returns null (after messaging the user, or on cancel) when none resolve.</summary>
+    private (string User, string Password)? ResolveSignOnCredential(TerminalSession s)
+    {
+        string? connId = string.IsNullOrEmpty(s.Settings.Id)
+            ? ConnectionStore.FindByEndpoint(s.Settings.HostName, s.Settings.Port, s.Settings.DeviceName)?.Id
+            : s.Settings.Id;
+
+        var labels = string.IsNullOrEmpty(connId)
+            ? (IReadOnlyList<string>)Array.Empty<string>()
+            : CredentialStore.LabelsForConnection(connId);
+
+        if (labels.Count == 0)
+        {
+            MessageBox.Show(
+                $"No saved credentials for '{s.Settings.DisplayName}'.\nAdd them via Session > Manage Saved Credentials.",
+                "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return null;
+        }
+
+        string? label = labels.Count == 1 ? labels[0] : CredentialPicker.Choose(this, s.Settings.DisplayName, labels);
+        if (label == null) return null;   // user cancelled the picker
+
+        var creds = CredentialStore.GetForConnection(connId!, label);
+        if (creds is null)
+            MessageBox.Show($"Could not read the saved credential for '{s.Settings.DisplayName}'.",
+                "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        return creds;
+    }
+
     private void OnToggleMcpStartup(object? sender, EventArgs e)
     {
         _settings.StartMcpOnStartup = !_settings.StartMcpOnStartup;
@@ -381,19 +423,19 @@ public class MainForm : Form
         AppSettingsStore.Save(_settings);
 
         // Convenience: enabling it starts the server now if it isn't already running.
-        if (_settings.StartMcpOnStartup && _mcpHost == null)
-            _ = StartMcpAsync();
+        if (_settings.StartMcpOnStartup && !_shell.McpRunning)
+            _ = _shell.StartMcpAsync();
     }
 
     private void OnMcpInfo(object? sender, EventArgs e)
     {
-        if (_mcpHost == null)
+        if (_shell.McpHost is not { } host)
         {
             MessageBox.Show("MCP server is not running. Use Tools → Start MCP Server.",
                 "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
-        using var dlg = new McpInfoDialog(_mcpHost);
+        using var dlg = new McpInfoDialog(host);
         dlg.ShowDialog(this);
     }
 
@@ -435,7 +477,9 @@ public class MainForm : Form
         dlg.ShowDialog(this);
     }
 
-    private void OnSessionAdded(TerminalSession session)
+    /// <summary>Build a terminal control + tab for a newly-created session in this window.
+    /// Called by the AppShell, which routes each new session to its owning window.</summary>
+    internal void PlaceSessionTab(TerminalSession session)
     {
         var control = BuildTerminalControl(session);
 
@@ -459,21 +503,8 @@ public class MainForm : Form
             _tabBar.AddTab(session.Title, ctx);   // selects the tab -> OnTabChanged -> ActivateTab
         }
 
-        session.ConnectionClosed += reason =>
-        {
-            if (InvokeRequired) BeginInvoke(() => OnSessionDisconnected(session, reason));
-            else OnSessionDisconnected(session, reason);
-        };
-
-        session.StatusMessage += msg =>
-        {
-            if (InvokeRequired) BeginInvoke(() => UpdateStatus(session, msg));
-            else UpdateStatus(session, msg);
-        };
-
-        if (!string.IsNullOrEmpty(_mcpStartup?.LogFile))
-            session.DebugLogged += AppendLog;
-
+        // ConnectionClosed / StatusMessage / DebugLogged are subscribed once by the AppShell
+        // and routed to whichever window owns the tab, so moving a tab needs no rewiring.
         ActivateTab(ctx);
     }
 
@@ -498,7 +529,33 @@ public class MainForm : Form
             kpe.Handled = true;
         };
 
+        control.PasteRequested += text => PasteIntoSession(session, text);
+
         return control;
+    }
+
+    /// <summary>Type pasted clipboard text into the active field via the session's normal
+    /// input path. Tabs and newlines advance to the next field (so a spreadsheet row or a
+    /// multi-line block fills consecutive fields); only printable characters are typed.
+    /// Newlines are never turned into an Enter/AID, so a paste can never submit the screen.</summary>
+    private static void PasteIntoSession(TerminalSession session, string text)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+
+        // Normalise line endings, then split on tab OR newline into field-sized tokens.
+        text = text.Replace("\r\n", "\n").Replace('\r', '\n');
+        string[] tokens = text.Split('\t', '\n');
+
+        for (int i = 0; i < tokens.Length; i++)
+        {
+            var sb = new System.Text.StringBuilder(tokens[i].Length);
+            foreach (char ch in tokens[i])
+                if (ch >= ' ' && ch <= '~') sb.Append(ch);   // drop stray control chars
+
+            if (sb.Length > 0) session.TypeString(sb.ToString());
+            if (i < tokens.Length - 1)
+                session.HandleKeyAction(KeyAction.FromType(KeyActionType.Tab));
+        }
     }
 
     /// <summary>Replace a tab's content control (Home page or old terminal) with a new one.</summary>
@@ -514,22 +571,13 @@ public class MainForm : Form
         _terminalPanel.Controls.Add(newContent);
     }
 
-    private readonly object _logLock = new();
-
-    // Append host-side trace lines to the --logfile. Lines for records we SEND are
-    // skipped so the operator's keystrokes (including passwords) are never written.
-    private void AppendLog(string line)
-    {
-        var path = _mcpStartup?.LogFile;
-        if (string.IsNullOrEmpty(path)) return;
-        if (line.Contains("SEND record")) return;
-        try { lock (_logLock) System.IO.File.AppendAllText(path, line + Environment.NewLine); }
-        catch { /* diagnostics only */ }
-    }
+    /// <summary>True when this window currently shows a tab for <paramref name="session"/>.
+    /// The AppShell uses it to route a session's events to the window that owns its tab.</summary>
+    internal bool OwnsSession(TerminalSession session) => FindContextBySession(session) != null;
 
     // Fires only for teardown we didn't start from the UI (e.g. the MCP `disconnect` tool).
     // UI-initiated closes null ctx.Session first, so this finds nothing and no-ops then.
-    private void OnSessionRemoved(TerminalSession session)
+    internal void HandleRemoved(TerminalSession session)
     {
         var ctx = FindContextBySession(session);
         if (ctx == null) return;
@@ -538,7 +586,7 @@ public class MainForm : Form
     }
 
     // Socket dropped (host, error, or user Disconnect): keep the tab as [Closed] and toast.
-    private void OnSessionDisconnected(TerminalSession session, string reason)
+    internal void HandleDisconnected(TerminalSession session, string reason)
     {
         var ctx = FindContextBySession(session);
         if (ctx == null) return;
@@ -552,7 +600,7 @@ public class MainForm : Form
         ShowDisconnectToast(session.Title, reason);
     }
 
-    private void UpdateStatus(TerminalSession session, string msg)
+    internal void HandleStatus(TerminalSession session, string msg)
     {
         if (FindContextBySession(session)?.Content is TerminalControl tc)
         {
@@ -571,6 +619,16 @@ public class MainForm : Form
     {
         if (_tabBar.GetTabTag(index) is TabContext ctx) CloseTab(ctx);
     }
+
+    // A tab dragged out of the bar: hand it to the shell, which docks it into another window
+    // if dropped over that window's tab strip, otherwise opens a new window at the drop point.
+    // The session stays in the shared SessionManager, so MCP keeps driving it.
+    private void OnTabDetached(int index, Point screenLocation)
+    {
+        if (_tabBar.GetTabTag(index) is TabContext ctx)
+            _shell.DropDetachedTab(this, DetachTab(ctx), screenLocation);
+    }
+
 
     /// <summary>Fully close a tab: tear down its session (if any) and remove the tab.</summary>
     private void CloseTab(TabContext ctx)
@@ -595,7 +653,45 @@ public class MainForm : Form
         _tabs.Remove(ctx);
         if (idx >= 0) _tabBar.RemoveTabAt(idx);   // fires OnTabChanged for the new selection
         if (ReferenceEquals(_activeTab, ctx)) _activeTab = null;
-        if (_tabs.Count == 0) OpenHomeTab();      // never leave the window tab-less
+        if (_tabs.Count == 0)
+        {
+            // Closing the last tab closes the window — unless it's the last window, which
+            // instead falls back to the Home page so the app stays open. Defer the Close so the
+            // current tab-close / mouse handler unwinds before the form (and tab bar) dispose.
+            if (_shell.WindowCount > 1) BeginInvoke(new Action(Close));
+            else OpenHomeTab();
+        }
+    }
+
+    /// <summary>Remove a tab from THIS window without tearing down its session or content —
+    /// used to hand it to another window. The caller owns the returned context afterwards.</summary>
+    internal TabContext DetachTab(TabContext ctx)
+    {
+        int idx = _tabBar.FindTabByTag(ctx);
+        _terminalPanel.Controls.Remove(ctx.Content);   // reparent out; keep control + buffer alive
+        _tabs.Remove(ctx);
+        if (idx >= 0) _tabBar.RemoveTabAt(idx);
+        if (ReferenceEquals(_activeTab, ctx)) _activeTab = null;
+        // No Home fallback here: multi-tab tear-out leaves other tabs; single-tab dock closes
+        // the now-empty source window (the shell handles that).
+        return ctx;
+    }
+
+    /// <summary>Detach this window's only tab — used when merging a single-tab window into
+    /// another. The source window is expected to close afterwards.</summary>
+    internal TabContext? DetachSingleTab() => _tabs.Count > 0 ? DetachTab(_tabs[0]) : null;
+
+    /// <summary>Show/move the combine insertion placeholder in this window's tab strip.</summary>
+    internal void SetDropTarget(Point screen) => _tabBar.SetDropTarget(screen);
+    internal void ClearDrop() => _tabBar.ClearDrop();
+
+    /// <summary>Take a tab detached from another window into this one and select it.</summary>
+    internal void AdoptTab(TabContext ctx)
+    {
+        _tabs.Add(ctx);
+        _terminalPanel.Controls.Add(ctx.Content);
+        string title = ctx.Session is { } s ? s.Title : "Home";
+        _tabBar.AdoptTabAtDrop(title, ctx);   // inserts at the placeholder slot (or appends) + selects
     }
 
     private void ActivateTab(TabContext ctx)
@@ -624,8 +720,8 @@ public class MainForm : Form
 
     private void UpdateToolsMenuState()
     {
-        if (_startMcpItem != null) _startMcpItem.Enabled = _mcpHost == null;
-        if (_stopMcpItem != null) _stopMcpItem.Enabled = _mcpHost != null;
+        if (_startMcpItem != null) _startMcpItem.Enabled = !_shell.McpRunning;
+        if (_stopMcpItem != null) _stopMcpItem.Enabled = _shell.McpRunning;
     }
 
     private void OnManageConnections(object? sender, EventArgs e)
@@ -711,27 +807,61 @@ public class MainForm : Form
         catch { return null; }
     }
 
+    // ---- custom-frame plumbing (native sizing frame, caption reclaimed for our tab strip) ---
+
+    protected override void WndProc(ref Message m)
+    {
+        const int WM_NCCALCSIZE = 0x0083;
+
+        if (m.Msg == WM_NCCALCSIZE && m.WParam != IntPtr.Zero)
+        {
+            // rgrc[0] (first RECT at lParam) is the proposed window rect. Let Windows apply its
+            // default frame (adds the native resize borders + caption inset), then give the
+            // caption height back to the client so our tab strip fills the top. The native side/
+            // bottom sizing borders remain, so resize + snap + maximize all stay native — and
+            // there's no client padding, so no gray border. When maximized we keep the default
+            // top inset (otherwise the top would be clipped off-screen).
+            int originalTop = Marshal.PtrToStructure<RECT>(m.LParam).top;
+            DefWindowProc(m.HWnd, m.Msg, m.WParam, m.LParam);
+            var r = Marshal.PtrToStructure<RECT>(m.LParam);
+            if (WindowState != FormWindowState.Maximized) r.top = originalTop;
+            Marshal.StructureToPtr(r, m.LParam, false);
+            m.Result = IntPtr.Zero;
+            return;
+        }
+
+        base.WndProc(ref m);
+    }
+
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        _captionButtons?.Invalidate();   // refresh the max/restore glyph
+    }
+
+    [StructLayout(LayoutKind.Sequential)] private struct RECT { public int left, top, right, bottom; }
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        // Don't block the app's close on MCP host shutdown. When an MCP client is connected,
-        // the host's graceful stop waits on the client's long-lived SSE session and ignores the
-        // shutdown timeout (~3s). We're exiting anyway, so tear the host down best-effort on a
-        // background thread and let process exit reclaim the loopback socket — verified that an
-        // un-stopped Kestrel host does not keep the process alive. Closing is now instant.
-        if (_mcpHost != null)
-        {
-            var host = _mcpHost;
-            _mcpHost = null;
-            _ = Task.Run(async () => { try { await host.DisposeAsync(); } catch { /* exiting */ } });
-        }
-        _sessionManager.CloseAll();
         base.OnFormClosing(e);
+        // Close only THIS window's sessions (a shared SessionManager may hold others shown in
+        // other windows). Null ctx.Session first so HandleRemoved doesn't churn the closing
+        // tab bar. The AppShell tears down the MCP host and remaining state when the LAST
+        // window closes (see AppShell.OnWindowClosed).
+        foreach (var ctx in _tabs.ToArray())
+        {
+            if (ctx.Session is { } s)
+            {
+                ctx.Session = null;
+                _sessionManager.CloseSession(s);
+            }
+        }
     }
 
     /// <summary>What a single tab is showing. A tab holds a content control that is either a
     /// <see cref="WelcomePanel"/> (Home — no session yet) or a <see cref="TerminalControl"/>
     /// bound to <see cref="Session"/>. IsHome ⇔ Session is null.</summary>
-    private sealed class TabContext
+    internal sealed class TabContext
     {
         public Control Content = null!;
         public TerminalSession? Session;
@@ -740,19 +870,37 @@ public class MainForm : Form
 }
 
 /// <summary>
-/// Welcome screen shown when no sessions are active.
+/// Welcome / launcher screen shown for a Home tab. Two columns:
+///  • left — saved connections; clicking one connects (no sign-on), like the old quick-launch.
+///  • right — "quick launch": one entry per saved credential (bound to a connection); clicking
+///    connects to that connection AND signs on with that credential in a single step.
 /// </summary>
 internal class WelcomePanel : Control
 {
-    public event EventHandler? ConnectClicked;
-    public event EventHandler<ConnectionSettings>? LaunchProfile;
+    public event EventHandler? ConnectClicked;                    // "+ New connection"
+    public event EventHandler<ConnectionSettings>? LaunchProfile; // left card: connect only
+    public event Action<ConnectionSettings, string>? QuickSignOn; // right card: connect + sign on as (label)
 
-    private readonly List<ConnectionSettings> _profiles;
-    private readonly List<Rectangle> _profileRects = new();
-    private Rectangle _actionRect;   // "Connect" button (no profiles) OR "+ New connection" link
-    private int _hover = -1;         // 0..n-1 = profile card, n = action, -1 = none
+    private sealed class QuickEntry
+    {
+        public ConnectionSettings Connection = null!;
+        public string Label = "";
+        public string User = "";
+    }
 
-    private const int CardW = 380, CardH = 58, CardGap = 12;
+    private List<ConnectionSettings> _connections;
+    private List<QuickEntry> _quick;
+
+    // Hit rectangles, rebuilt every paint so they always match what's drawn.
+    private readonly List<Rectangle> _connRects = new();
+    private readonly List<Rectangle> _quickRects = new();
+    private Rectangle _newConnRect;
+
+    private enum Hot { None, Conn, New, Quick }
+    private Hot _hotKind = Hot.None;
+    private int _hotIndex = -1;
+
+    private const int CardW = 300, CardH = 58, CardGap = 10, ColGap = 28, HeaderH = 42, NewCardH = 32;
 
     public WelcomePanel()
     {
@@ -763,7 +911,42 @@ internal class WelcomePanel : Control
             ControlStyles.ResizeRedraw,
             true);
         BackColor = DarkTheme.Background;
-        _profiles = ConnectionStore.Load();
+        _connections = ConnectionStore.Load();
+        _quick = LoadQuick(_connections);
+    }
+
+    // Re-read connections + credentials whenever the Home tab is shown, so changes made in the
+    // Manage dialogs while this tab was in the background appear when the user returns to it.
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        base.OnVisibleChanged(e);
+        if (!Visible) return;
+        _connections = ConnectionStore.Load();
+        _quick = LoadQuick(_connections);
+        _hotKind = Hot.None;
+        _hotIndex = -1;
+        Invalidate();
+    }
+
+    /// <summary>Build the right-column entries: every saved credential mapped to its connection.
+    /// Credentials whose connection no longer exists are skipped (orphaned by a deleted connection).</summary>
+    private static List<QuickEntry> LoadQuick(List<ConnectionSettings> connections)
+    {
+        var quick = new List<QuickEntry>();
+        if (!OperatingSystem.IsWindows()) return quick;   // Credential Manager is Windows-only
+
+        var byId = new Dictionary<string, ConnectionSettings>(StringComparer.OrdinalIgnoreCase);
+        foreach (var c in connections)
+            if (!string.IsNullOrEmpty(c.Id)) byId[c.Id] = c;
+
+        foreach (var (connId, label, user) in AC5250.Security.CredentialStore.ListForConnection())
+            if (byId.TryGetValue(connId, out var conn))
+                quick.Add(new QuickEntry { Connection = conn, Label = label, User = user });
+
+        return quick
+            .OrderBy(q => q.Connection.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(q => q.Label, StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -773,132 +956,177 @@ internal class WelcomePanel : Control
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
         g.Clear(DarkTheme.Background);
-        _profileRects.Clear();
+        _connRects.Clear();
+        _quickRects.Clear();
+        _newConnRect = Rectangle.Empty;
 
-        int centerX = Width / 2;
-        bool hasProfiles = _profiles.Count > 0;
-
-        using var titleFont = new Font("Consolas", 28f, FontStyle.Bold);
-        using var subFont = new Font("Segoe UI", 11f);
+        using var titleFont = new Font("Consolas", 22f, FontStyle.Bold);
+        using var subFont = new Font("Segoe UI", 10f);
         using var headingFont = new Font("Segoe UI", 9f, FontStyle.Bold);
+        using var captionFont = new Font("Segoe UI", 8.5f);
         using var nameFont = new Font("Segoe UI", 11f, FontStyle.Bold);
         using var detailFont = new Font("Segoe UI", 8.5f);
-        using var btnFont = new Font("Segoe UI", 10f, FontStyle.Bold);
-        using var hintFont = new Font("Segoe UI", 8.5f);
 
+        int centerX = Width / 2;
+
+        // Measure the header + columns up front so the whole block can be centered vertically
+        // (rather than pinned to the top).
         var titleSize = TextRenderer.MeasureText(g, "AC5250", titleFont);
-        var subSize = TextRenderer.MeasureText(g, "x", subFont);
-
-        // Compute total content height so the block is vertically centered.
-        int contentH = titleSize.Height + 8 + subSize.Height + 30;
-        if (hasProfiles)
-            contentH += 22 /*heading*/ + _profiles.Count * (CardH + CardGap) + 30 /*new link*/;
-        else
-            contentH += 40 /*connect btn*/ + 22 /*hint*/;
-
-        int y = Math.Max(24, (Height - contentH) / 2);
-
-        // Title
-        TextRenderer.DrawText(g, "AC5250", titleFont,
-            new Point(centerX - titleSize.Width / 2, y), DarkTheme.Accent);
-        y += titleSize.Height + 8;
-
-        // Subtitle
         var sub = "Aidan's Custom TN5250 Terminal Emulator";
-        var subMeasured = TextRenderer.MeasureText(g, sub, subFont);
-        TextRenderer.DrawText(g, sub, subFont,
-            new Point(centerX - subMeasured.Width / 2, y), DarkTheme.TextSecondary);
-        y += subMeasured.Height + 30;
+        var subSize = TextRenderer.MeasureText(g, sub, subFont);
 
-        if (hasProfiles)
+        int leftColH = _connections.Count * (CardH + CardGap) + NewCardH;
+        int rightColH = _quick.Count > 0 ? _quick.Count * (CardH + CardGap) - CardGap : 4 * 20;
+        int headerBlockH = titleSize.Height + 2 + subSize.Height + 26;
+        int contentH = headerBlockH + HeaderH + Math.Max(leftColH, rightColH);
+
+        int y = Math.Max(20, (Height - contentH) / 2);
+
+        // Header (compact, de-emphasized so the launcher itself is the focus).
+        TextRenderer.DrawText(g, "AC5250", titleFont, new Point(centerX - titleSize.Width / 2, y), DarkTheme.Accent);
+        y += titleSize.Height + 2;
+        TextRenderer.DrawText(g, sub, subFont, new Point(centerX - subSize.Width / 2, y), DarkTheme.TextSecondary);
+        y += subSize.Height + 26;
+
+        // Two columns, centered as a pair. colW shrinks to fit a narrow window but we always
+        // keep both columns side by side (a 24x80 terminal window is comfortably wide enough).
+        int availW = Width - 32;
+        int colW = Math.Clamp((availW - ColGap) / 2, 170, CardW);
+        int totalW = colW * 2 + ColGap;
+        int leftX = Math.Max(16, centerX - totalW / 2);
+        int rightX = leftX + colW + ColGap;
+
+        // Column headings + captions.
+        TextRenderer.DrawText(g, "SAVED CONNECTIONS", headingFont, new Point(leftX + 2, y), DarkTheme.TextMuted);
+        TextRenderer.DrawText(g, "connect — no sign-on", captionFont, new Point(leftX + 2, y + 17), DarkTheme.TextMuted);
+        TextRenderer.DrawText(g, "QUICK LAUNCH", headingFont, new Point(rightX + 2, y), DarkTheme.TextMuted);
+        TextRenderer.DrawText(g, "connect + sign on", captionFont, new Point(rightX + 2, y + 17), DarkTheme.TextMuted);
+
+        int cardsTop = y + HeaderH;
+
+        // Left column: one card per saved connection, then a thin "+ New connection…" card.
+        int ly = cardsTop;
+        for (int i = 0; i < _connections.Count; i++)
         {
-            // "QUICK LAUNCH" heading, left-aligned to the card column
-            int cardX = centerX - CardW / 2;
-            TextRenderer.DrawText(g, "QUICK LAUNCH", headingFont,
-                new Point(cardX + 2, y), DarkTheme.TextMuted);
-            y += 22;
+            var rect = new Rectangle(leftX, ly, colW, CardH);
+            _connRects.Add(rect);
+            DrawConnectionCard(g, rect, _connections[i], _hotKind == Hot.Conn && _hotIndex == i, nameFont, detailFont);
+            ly += CardH + CardGap;
+        }
+        _newConnRect = new Rectangle(leftX, ly, colW, NewCardH);
+        DrawNewCard(g, _newConnRect, _hotKind == Hot.New, detailFont);
 
-            for (int i = 0; i < _profiles.Count; i++)
+        // Right column: one card per saved credential (connect + sign on), or a hint if none.
+        if (_quick.Count == 0)
+        {
+            var lines = new[]
             {
-                var rect = new Rectangle(cardX, y, CardW, CardH);
-                _profileRects.Add(rect);
-                bool hot = _hover == i;
-
-                using var fill = new SolidBrush(hot ? Color.FromArgb(40, DarkTheme.Accent) : DarkTheme.Surface);
-                using var pen = new Pen(hot ? DarkTheme.Accent : DarkTheme.Border, hot ? 1.5f : 1f);
-                FillRoundedRect(g, fill, rect, 8);
-                DrawRoundedRect(g, pen, rect, 8);
-
-                var p = _profiles[i];
-                TextRenderer.DrawText(g, p.DisplayName, nameFont,
-                    new Point(rect.X + 16, rect.Y + 9), hot ? DarkTheme.AccentHover : DarkTheme.TextPrimary,
-                    TextFormatFlags.Left);
-
-                string size = p.ScreenSize == ScreenSize.Wide ? "27x132" : "24x80";
-                string dev = string.IsNullOrEmpty(p.DeviceName) ? "auto device" : p.DeviceName;
-                string detail = $"{p.HostName}:{p.Port}   ·   {dev}   ·   {size}{(p.UseSsl ? "   ·   SSL" : "")}";
-                TextRenderer.DrawText(g, detail, detailFont,
-                    new Point(rect.X + 16, rect.Y + 32), DarkTheme.TextSecondary, TextFormatFlags.Left);
-
-                // ">" launch chevron on the right
-                TextRenderer.DrawText(g, "›", nameFont,
-                    new Rectangle(rect.Right - 34, rect.Y, 24, CardH),
-                    hot ? DarkTheme.AccentHover : DarkTheme.TextMuted,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-
-                y += CardH + CardGap;
+                "No saved logins yet.",
+                "Attach one to a connection via",
+                "Session ▸ Manage Saved Credentials",
+                "to enable one-click sign-on.",
+            };
+            int hy = cardsTop + 4;
+            foreach (var line in lines)
+            {
+                TextRenderer.DrawText(g, line, captionFont, new Point(rightX + 2, hy), DarkTheme.TextMuted);
+                hy += 20;
             }
-
-            // "+ New connection…" link
-            var linkText = "+  New connection…";
-            var linkSize = TextRenderer.MeasureText(g, linkText, detailFont);
-            _actionRect = new Rectangle(centerX - linkSize.Width / 2 - 8, y + 4, linkSize.Width + 16, linkSize.Height + 8);
-            bool linkHot = _hover == _profiles.Count;
-            TextRenderer.DrawText(g, linkText, detailFont, _actionRect,
-                linkHot ? DarkTheme.AccentHover : DarkTheme.TextMuted,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
         }
         else
         {
-            // No saved profiles: single Connect button (original behavior)
-            int btnW = 180, btnH = 40;
-            _actionRect = new Rectangle(centerX - btnW / 2, y, btnW, btnH);
-            bool hot = _hover == 0;
-
-            var btnColor = hot ? DarkTheme.AccentHover : DarkTheme.Accent;
-            using var btnBrush = new SolidBrush(hot ? Color.FromArgb(30, DarkTheme.Accent) : Color.Transparent);
-            using var btnPen = new Pen(btnColor, 1.5f);
-            FillRoundedRect(g, btnBrush, _actionRect, 8);
-            DrawRoundedRect(g, btnPen, _actionRect, 8);
-            TextRenderer.DrawText(g, "Connect", btnFont, _actionRect, btnColor,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-
-            y += btnH + 22;
-
-            var hint = "Ctrl+N to connect  |  F1 for key mappings";
-            var hintSize = TextRenderer.MeasureText(g, hint, hintFont);
-            TextRenderer.DrawText(g, hint, hintFont,
-                new Point(centerX - hintSize.Width / 2, y), DarkTheme.TextMuted);
+            int ry = cardsTop;
+            for (int i = 0; i < _quick.Count; i++)
+            {
+                var rect = new Rectangle(rightX, ry, colW, CardH);
+                _quickRects.Add(rect);
+                DrawQuickCard(g, rect, _quick[i], _hotKind == Hot.Quick && _hotIndex == i, nameFont, detailFont);
+                ry += CardH + CardGap;
+            }
         }
     }
 
-    /// <summary>Hit-test index: 0..n-1 profile card, n = action (new link / connect btn), -1 none.</summary>
-    private int HitTest(Point pt)
+    private void DrawConnectionCard(Graphics g, Rectangle rect, ConnectionSettings p, bool hot, Font nameFont, Font detailFont)
     {
-        for (int i = 0; i < _profileRects.Count; i++)
-            if (_profileRects[i].Contains(pt)) return i;
-        if (_actionRect.Contains(pt)) return _profiles.Count > 0 ? _profiles.Count : 0;
-        return -1;
+        PaintCardBackground(g, rect, hot);
+        TextRenderer.DrawText(g, p.DisplayName, nameFont,
+            new Rectangle(rect.X + 14, rect.Y + 8, rect.Width - 44, 20),
+            hot ? DarkTheme.AccentHover : DarkTheme.TextPrimary,
+            TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+
+        string size = p.ScreenSize == ScreenSize.Wide ? "27x132" : "24x80";
+        string dev = string.IsNullOrEmpty(p.DeviceName) ? "auto device" : p.DeviceName;
+        string detail = $"{p.HostName}:{p.Port}  ·  {dev}  ·  {size}{(p.UseSsl ? "  ·  SSL" : "")}";
+        TextRenderer.DrawText(g, detail, detailFont,
+            new Rectangle(rect.X + 14, rect.Y + 32, rect.Width - 44, 18), DarkTheme.TextSecondary,
+            TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+
+        DrawChevron(g, rect, hot, nameFont);
+    }
+
+    private void DrawQuickCard(Graphics g, Rectangle rect, QuickEntry q, bool hot, Font nameFont, Font detailFont)
+    {
+        PaintCardBackground(g, rect, hot);
+        string title = string.IsNullOrEmpty(q.Label) ? "(default login)" : q.Label;
+        TextRenderer.DrawText(g, title, nameFont,
+            new Rectangle(rect.X + 14, rect.Y + 8, rect.Width - 44, 20),
+            hot ? DarkTheme.AccentHover : DarkTheme.TextPrimary,
+            TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+
+        string detail = string.IsNullOrEmpty(q.User)
+            ? $"on {q.Connection.DisplayName}"
+            : $"{q.User}  ·  on {q.Connection.DisplayName}";
+        TextRenderer.DrawText(g, detail, detailFont,
+            new Rectangle(rect.X + 14, rect.Y + 32, rect.Width - 44, 18), DarkTheme.TextSecondary,
+            TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+
+        DrawChevron(g, rect, hot, nameFont);
+    }
+
+    private void DrawNewCard(Graphics g, Rectangle rect, bool hot, Font nameFont)
+    {
+        using var fill = new SolidBrush(hot ? Color.FromArgb(40, DarkTheme.Accent) : Color.Transparent);
+        using var pen = new Pen(hot ? DarkTheme.Accent : DarkTheme.Border, hot ? 1.5f : 1f);
+        FillRoundedRect(g, fill, rect, 8);
+        DrawRoundedRect(g, pen, rect, 8);
+        TextRenderer.DrawText(g, "+  New connection…", nameFont, rect,
+            hot ? DarkTheme.AccentHover : DarkTheme.TextMuted,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+    }
+
+    private void PaintCardBackground(Graphics g, Rectangle rect, bool hot)
+    {
+        using var fill = new SolidBrush(hot ? Color.FromArgb(40, DarkTheme.Accent) : DarkTheme.Surface);
+        using var pen = new Pen(hot ? DarkTheme.Accent : DarkTheme.Border, hot ? 1.5f : 1f);
+        FillRoundedRect(g, fill, rect, 8);
+        DrawRoundedRect(g, pen, rect, 8);
+    }
+
+    private static void DrawChevron(Graphics g, Rectangle rect, bool hot, Font font) =>
+        TextRenderer.DrawText(g, "›", font, new Rectangle(rect.Right - 30, rect.Y, 22, rect.Height),
+            hot ? DarkTheme.AccentHover : DarkTheme.TextMuted,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+
+    /// <summary>Which card (if any) is at a point, and its index within that column's list.</summary>
+    private (Hot kind, int index) HitTest(Point pt)
+    {
+        for (int i = 0; i < _connRects.Count; i++)
+            if (_connRects[i].Contains(pt)) return (Hot.Conn, i);
+        if (_newConnRect.Contains(pt)) return (Hot.New, -1);
+        for (int i = 0; i < _quickRects.Count; i++)
+            if (_quickRects[i].Contains(pt)) return (Hot.Quick, i);
+        return (Hot.None, -1);
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
-        int hit = HitTest(e.Location);
-        if (hit != _hover)
+        var (kind, index) = HitTest(e.Location);
+        if (kind != _hotKind || index != _hotIndex)
         {
-            _hover = hit;
-            Cursor = hit >= 0 ? Cursors.Hand : Cursors.Default;
+            _hotKind = kind;
+            _hotIndex = index;
+            Cursor = kind == Hot.None ? Cursors.Default : Cursors.Hand;
             Invalidate();
         }
     }
@@ -906,19 +1134,32 @@ internal class WelcomePanel : Control
     protected override void OnMouseLeave(EventArgs e)
     {
         base.OnMouseLeave(e);
-        if (_hover != -1) { _hover = -1; Cursor = Cursors.Default; Invalidate(); }
+        if (_hotKind != Hot.None)
+        {
+            _hotKind = Hot.None;
+            _hotIndex = -1;
+            Cursor = Cursors.Default;
+            Invalidate();
+        }
     }
 
     protected override void OnMouseClick(MouseEventArgs e)
     {
         base.OnMouseClick(e);
-        int hit = HitTest(e.Location);
-        if (hit < 0) return;
-
-        if (_profiles.Count > 0 && hit < _profiles.Count)
-            LaunchProfile?.Invoke(this, _profiles[hit]);   // quick-launch a saved profile
-        else
-            ConnectClicked?.Invoke(this, EventArgs.Empty);  // "+ New connection" or "Connect"
+        var (kind, index) = HitTest(e.Location);
+        switch (kind)
+        {
+            case Hot.Conn:
+                LaunchProfile?.Invoke(this, _connections[index]);          // connect only
+                break;
+            case Hot.New:
+                ConnectClicked?.Invoke(this, EventArgs.Empty);             // new connection dialog
+                break;
+            case Hot.Quick:
+                var q = _quick[index];
+                QuickSignOn?.Invoke(q.Connection, q.Label);                // connect + sign on
+                break;
+        }
     }
 
     private static void FillRoundedRect(Graphics g, Brush brush, Rectangle rect, int radius)
@@ -1245,7 +1486,17 @@ internal sealed class ManageConnectionsDialog : Form
     {
         int i = _list.SelectedIndex;
         if (i < 0 || i >= _items.Count) return;
-        ConnectionStore.Remove(_items[i].DisplayName);
+        var c = _items[i];
+
+        bool hasCreds = !string.IsNullOrEmpty(c.Id) && CredentialStore.LabelsForConnection(c.Id).Count > 0;
+        string msg = hasCreds
+            ? $"Delete '{c.DisplayName}' and its saved sign-on credential(s)?"
+            : $"Delete '{c.DisplayName}'?";
+        if (MessageBox.Show(this, msg, "AC5250", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+            return;
+
+        if (!string.IsNullOrEmpty(c.Id)) CredentialStore.DeleteAllForConnection(c.Id);
+        ConnectionStore.Remove(c.DisplayName);
         Reload();
     }
 

@@ -33,8 +33,9 @@ var controller = new EmulatorController(
     dispatcher,
     settings => sessions.CreateSession(settings, dispatcher.Context),
     // Sign-on credentials from the platform-appropriate source: Windows Credential Manager
-    // on Windows, environment variables (AC5250_<HOST>_USER / _PASSWORD) elsewhere. The
-    // password is read on demand only to fill the field, never stored here, never returned.
+    // on Windows, environment variables (AC5250_<CONNECTION>_USER / _PASSWORD, keyed by the
+    // saved connection) elsewhere. The password is read on demand only to fill the field,
+    // never stored here, never returned.
     AC5250.Security.CredentialSources.CreateDefault());
 
 builder.Services.AddSingleton(controller);

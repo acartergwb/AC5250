@@ -18,6 +18,8 @@ public class ConnectDialog : Form
 
     private List<ConnectionSettings> _saved = new();
     private bool _loadingSaved;
+    private string _editingId = "";   // id of the saved connection being edited ("" = new), so
+                                      // a save preserves identity (and its bound credentials)
 
     public ConnectionSettings Settings { get; private set; } = new();
 
@@ -250,6 +252,7 @@ public class ConnectDialog : Form
         int idx = _savedBox.SelectedIndex - 1; // 0 == "(new connection)"
         _deleteButton.Enabled = idx >= 0;
         if (idx >= 0 && idx < _saved.Count) FillFrom(_saved[idx]);
+        else _editingId = "";   // "(new connection)" -> a fresh identity
     }
 
     private void OnSaveClick(object? sender, EventArgs e)
@@ -261,7 +264,8 @@ public class ConnectDialog : Form
             return;
         }
         var settings = BuildSettings();
-        _saved = ConnectionStore.Upsert(settings);
+        _saved = ConnectionStore.Upsert(settings);   // assigns settings.Id if it was new
+        _editingId = settings.Id;                     // keep editing the same identity
         LoadSaved();
         int i = _savedBox.Items.IndexOf(settings.DisplayName);
         if (i > 0) _savedBox.SelectedIndex = i;
@@ -277,6 +281,7 @@ public class ConnectDialog : Form
 
     private void FillFrom(ConnectionSettings c)
     {
+        _editingId = c.Id;   // keep this connection's identity through an edit + save
         _sessionNameBox.Text = c.SessionName;
         _hostBox.Text = c.HostName;
         _portBox.Value = Math.Clamp(c.Port, (int)_portBox.Minimum, (int)_portBox.Maximum);
@@ -287,6 +292,7 @@ public class ConnectDialog : Form
 
     private ConnectionSettings BuildSettings() => new()
     {
+        Id = _editingId,   // preserved for an edited connection; empty for a new one (Upsert assigns)
         HostName = _hostBox.Text.Trim(),
         Port = (int)_portBox.Value,
         UseSsl = _sslCheck.Checked,
