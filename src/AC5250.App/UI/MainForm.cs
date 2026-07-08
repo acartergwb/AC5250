@@ -881,26 +881,26 @@ internal class WelcomePanel : Control
     public event EventHandler<ConnectionSettings>? LaunchProfile; // left card: connect only
     public event Action<ConnectionSettings, string>? QuickSignOn; // right card: connect + sign on as (label)
 
-    private sealed class QuickEntry
-    {
-        public ConnectionSettings Connection = null!;
-        public string Label = "";
-        public string User = "";
-    }
+    private static readonly List<(string Label, string User)> NoLogins = new();
 
-    private List<ConnectionSettings> _connections;
-    private List<QuickEntry> _quick;
+    private List<ConnectionSettings> _connections = new();
+    // Saved logins (label + user) per connection id — shown inside each connection's card.
+    private Dictionary<string, List<(string Label, string User)>> _logins = new(StringComparer.OrdinalIgnoreCase);
 
-    // Hit rectangles, rebuilt every paint so they always match what's drawn.
-    private readonly List<Rectangle> _connRects = new();
-    private readonly List<Rectangle> _quickRects = new();
+    // Hit regions, rebuilt every paint so they always match what's drawn.
+    private readonly List<(Rectangle Rect, int Conn)> _headerHits = new();          // header -> connect (no sign-on)
+    private readonly List<(Rectangle Rect, int Conn, int Login)> _loginHits = new(); // login row -> connect + sign on
     private Rectangle _newConnRect;
 
-    private enum Hot { None, Conn, New, Quick }
-    private Hot _hotKind = Hot.None;
-    private int _hotIndex = -1;
+    private enum HotKind { None, Header, Login, New }
+    private HotKind _hotKind = HotKind.None;
+    private int _hotConn = -1;
+    private int _hotLogin = -1;
 
-    private const int CardW = 300, CardH = 58, CardGap = 10, ColGap = 28, HeaderH = 42, NewCardH = 32;
+    // Card geometry. Cards size to their login count; the two columns pack independently.
+    private const int CardW = 320, CardGap = 12, ColGap = 24, PadX = 14;
+    private const int NameY = 11, DetailY = 32, DividerY = 53, FirstLoginY = 61, LoginRowH = 22, CardBottomPad = 10;
+    private const int NewBtnW = 210, NewBtnH = 34, GridBtnGap = 18, HeadingH = 30;
 
     public WelcomePanel()
     {
@@ -911,8 +911,7 @@ internal class WelcomePanel : Control
             ControlStyles.ResizeRedraw,
             true);
         BackColor = DarkTheme.Background;
-        _connections = ConnectionStore.Load();
-        _quick = LoadQuick(_connections);
+        LoadData();
     }
 
     // Re-read connections + credentials whenever the Home tab is shown, so changes made in the
@@ -921,33 +920,33 @@ internal class WelcomePanel : Control
     {
         base.OnVisibleChanged(e);
         if (!Visible) return;
-        _connections = ConnectionStore.Load();
-        _quick = LoadQuick(_connections);
-        _hotKind = Hot.None;
-        _hotIndex = -1;
+        LoadData();
+        _hotKind = HotKind.None;
+        _hotConn = _hotLogin = -1;
         Invalidate();
     }
 
-    /// <summary>Build the right-column entries: every saved credential mapped to its connection.
-    /// Credentials whose connection no longer exists are skipped (orphaned by a deleted connection).</summary>
-    private static List<QuickEntry> LoadQuick(List<ConnectionSettings> connections)
+    /// <summary>Load saved connections and, per connection, its saved logins (label + user).</summary>
+    private void LoadData()
     {
-        var quick = new List<QuickEntry>();
-        if (!OperatingSystem.IsWindows()) return quick;   // Credential Manager is Windows-only
-
-        var byId = new Dictionary<string, ConnectionSettings>(StringComparer.OrdinalIgnoreCase);
-        foreach (var c in connections)
-            if (!string.IsNullOrEmpty(c.Id)) byId[c.Id] = c;
+        _connections = ConnectionStore.Load();
+        _logins = new(StringComparer.OrdinalIgnoreCase);
+        if (!OperatingSystem.IsWindows()) return;   // Credential Manager is Windows-only
 
         foreach (var (connId, label, user) in AC5250.Security.CredentialStore.ListForConnection())
-            if (byId.TryGetValue(connId, out var conn))
-                quick.Add(new QuickEntry { Connection = conn, Label = label, User = user });
-
-        return quick
-            .OrderBy(q => q.Connection.DisplayName, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(q => q.Label, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        {
+            if (!_logins.TryGetValue(connId, out var list)) _logins[connId] = list = new();
+            list.Add((label, user));
+        }
+        foreach (var list in _logins.Values)
+            list.Sort((a, b) => string.Compare(a.Label, b.Label, StringComparison.OrdinalIgnoreCase));
     }
+
+    private List<(string Label, string User)> LoginsFor(ConnectionSettings c)
+        => !string.IsNullOrEmpty(c.Id) && _logins.TryGetValue(c.Id, out var l) ? l : NoLogins;
+
+    private int CardHeight(ConnectionSettings c)
+        => FirstLoginY + Math.Max(LoginsFor(c).Count, 1) * LoginRowH + CardBottomPad;
 
     protected override void OnPaint(PaintEventArgs e)
     {
@@ -956,140 +955,135 @@ internal class WelcomePanel : Control
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
         g.Clear(DarkTheme.Background);
-        _connRects.Clear();
-        _quickRects.Clear();
+        _headerHits.Clear();
+        _loginHits.Clear();
         _newConnRect = Rectangle.Empty;
 
         using var titleFont = new Font("Consolas", 22f, FontStyle.Bold);
         using var subFont = new Font("Segoe UI", 10f);
         using var headingFont = new Font("Segoe UI", 9f, FontStyle.Bold);
-        using var captionFont = new Font("Segoe UI", 8.5f);
         using var nameFont = new Font("Segoe UI", 11f, FontStyle.Bold);
         using var detailFont = new Font("Segoe UI", 8.5f);
+        using var loginFont = new Font("Segoe UI", 9.5f);
 
         int centerX = Width / 2;
-
-        // Measure the header + columns up front so the whole block can be centered vertically
-        // (rather than pinned to the top).
         var titleSize = TextRenderer.MeasureText(g, "AC5250", titleFont);
         var sub = "Aidan's Custom TN5250 Terminal Emulator";
         var subSize = TextRenderer.MeasureText(g, sub, subFont);
 
-        int leftColH = _connections.Count * (CardH + CardGap) + NewCardH;
-        int rightColH = _quick.Count > 0 ? _quick.Count * (CardH + CardGap) - CardGap : 4 * 20;
-        int headerBlockH = titleSize.Height + 2 + subSize.Height + 26;
-        int contentH = headerBlockH + HeaderH + Math.Max(leftColH, rightColH);
+        // Two-column grid, centered as a pair; colW shrinks to fit a narrow window.
+        int availW = Width - 32;
+        int colW = Math.Clamp((availW - ColGap) / 2, 200, CardW);
+        int totalW = colW * 2 + ColGap;
+        int leftX = Math.Max(16, centerX - totalW / 2);
+        int[] colX = { leftX, leftX + colW + ColGap };
 
+        // Assign each connection to the currently-shorter column (masonry), so a tall card on
+        // one side doesn't leave a gap on the other. Track each card's column + relative Y.
+        int[] colBottom = { 0, 0 };
+        var place = new (int Col, int RelY, int H)[_connections.Count];
+        for (int i = 0; i < _connections.Count; i++)
+        {
+            int h = CardHeight(_connections[i]);
+            int col = colBottom[0] <= colBottom[1] ? 0 : 1;
+            place[i] = (col, colBottom[col], h);
+            colBottom[col] += h + CardGap;
+        }
+        int gridH = Math.Max(0, Math.Max(colBottom[0], colBottom[1]) - CardGap);
+
+        // Center the whole block (title + heading + grid + New-connection button) vertically.
+        int headerBlockH = titleSize.Height + 2 + subSize.Height + 26;
+        int contentH = headerBlockH + HeadingH + gridH + GridBtnGap + NewBtnH;
         int y = Math.Max(20, (Height - contentH) / 2);
 
-        // Header (compact, de-emphasized so the launcher itself is the focus).
         TextRenderer.DrawText(g, "AC5250", titleFont, new Point(centerX - titleSize.Width / 2, y), DarkTheme.Accent);
         y += titleSize.Height + 2;
         TextRenderer.DrawText(g, sub, subFont, new Point(centerX - subSize.Width / 2, y), DarkTheme.TextSecondary);
         y += subSize.Height + 26;
 
-        // Two columns, centered as a pair. colW shrinks to fit a narrow window but we always
-        // keep both columns side by side (a 24x80 terminal window is comfortably wide enough).
-        int availW = Width - 32;
-        int colW = Math.Clamp((availW - ColGap) / 2, 170, CardW);
-        int totalW = colW * 2 + ColGap;
-        int leftX = Math.Max(16, centerX - totalW / 2);
-        int rightX = leftX + colW + ColGap;
-
-        // Column headings + captions.
         TextRenderer.DrawText(g, "SAVED CONNECTIONS", headingFont, new Point(leftX + 2, y), DarkTheme.TextMuted);
-        TextRenderer.DrawText(g, "connect — no sign-on", captionFont, new Point(leftX + 2, y + 17), DarkTheme.TextMuted);
-        TextRenderer.DrawText(g, "QUICK LAUNCH", headingFont, new Point(rightX + 2, y), DarkTheme.TextMuted);
-        TextRenderer.DrawText(g, "connect + sign on", captionFont, new Point(rightX + 2, y + 17), DarkTheme.TextMuted);
+        int cardsTop = y + HeadingH;
 
-        int cardsTop = y + HeaderH;
-
-        // Left column: one card per saved connection, then a thin "+ New connection…" card.
-        int ly = cardsTop;
         for (int i = 0; i < _connections.Count; i++)
         {
-            var rect = new Rectangle(leftX, ly, colW, CardH);
-            _connRects.Add(rect);
-            DrawConnectionCard(g, rect, _connections[i], _hotKind == Hot.Conn && _hotIndex == i, nameFont, detailFont);
-            ly += CardH + CardGap;
+            var (col, relY, h) = place[i];
+            DrawConnectionCard(g, new Rectangle(colX[col], cardsTop + relY, colW, h), i, nameFont, detailFont, loginFont);
         }
-        _newConnRect = new Rectangle(leftX, ly, colW, NewCardH);
-        DrawNewCard(g, _newConnRect, _hotKind == Hot.New, detailFont);
 
-        // Right column: one card per saved credential (connect + sign on), or a hint if none.
-        if (_quick.Count == 0)
-        {
-            var lines = new[]
-            {
-                "No saved logins yet.",
-                "Attach one to a connection via",
-                "Session ▸ Manage Saved Credentials",
-                "to enable one-click sign-on.",
-            };
-            int hy = cardsTop + 4;
-            foreach (var line in lines)
-            {
-                TextRenderer.DrawText(g, line, captionFont, new Point(rightX + 2, hy), DarkTheme.TextMuted);
-                hy += 20;
-            }
-        }
-        else
-        {
-            int ry = cardsTop;
-            for (int i = 0; i < _quick.Count; i++)
-            {
-                var rect = new Rectangle(rightX, ry, colW, CardH);
-                _quickRects.Add(rect);
-                DrawQuickCard(g, rect, _quick[i], _hotKind == Hot.Quick && _hotIndex == i, nameFont, detailFont);
-                ry += CardH + CardGap;
-            }
-        }
+        // Single "+ New connection" button, centered beneath both columns.
+        int btnW = Math.Min(NewBtnW, colW);
+        _newConnRect = new Rectangle(centerX - btnW / 2, cardsTop + gridH + GridBtnGap, btnW, NewBtnH);
+        DrawNewButton(g, _newConnRect, _hotKind == HotKind.New, detailFont);
     }
 
-    private void DrawConnectionCard(Graphics g, Rectangle rect, ConnectionSettings p, bool hot, Font nameFont, Font detailFont)
+    private void DrawConnectionCard(Graphics g, Rectangle rect, int connIndex, Font nameFont, Font detailFont, Font loginFont)
     {
-        PaintCardBackground(g, rect, hot);
-        TextRenderer.DrawText(g, p.DisplayName, nameFont,
-            new Rectangle(rect.X + 14, rect.Y + 8, rect.Width - 44, 20),
-            hot ? DarkTheme.AccentHover : DarkTheme.TextPrimary,
+        var c = _connections[connIndex];
+        var logins = LoginsFor(c);
+        bool headerHot = _hotKind == HotKind.Header && _hotConn == connIndex;
+
+        PaintCardBackground(g, rect, headerHot);
+
+        // Header: name + endpoint detail + chevron (clicking here connects, no sign-on).
+        TextRenderer.DrawText(g, c.DisplayName, nameFont,
+            new Rectangle(rect.X + PadX, rect.Y + NameY, rect.Width - PadX - 30, 20),
+            headerHot ? DarkTheme.AccentHover : DarkTheme.TextPrimary,
             TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
 
-        string size = p.ScreenSize == ScreenSize.Wide ? "27x132" : "24x80";
-        string dev = string.IsNullOrEmpty(p.DeviceName) ? "auto device" : p.DeviceName;
-        string detail = $"{p.HostName}:{p.Port}  ·  {dev}  ·  {size}{(p.UseSsl ? "  ·  SSL" : "")}";
+        string size = c.ScreenSize == ScreenSize.Wide ? "27x132" : "24x80";
+        string dev = string.IsNullOrEmpty(c.DeviceName) ? "auto device" : c.DeviceName;
+        string detail = $"{c.HostName}:{c.Port}  ·  {dev}  ·  {size}{(c.UseSsl ? "  ·  SSL" : "")}";
         TextRenderer.DrawText(g, detail, detailFont,
-            new Rectangle(rect.X + 14, rect.Y + 32, rect.Width - 44, 18), DarkTheme.TextSecondary,
+            new Rectangle(rect.X + PadX, rect.Y + DetailY, rect.Width - PadX - 30, 18), DarkTheme.TextSecondary,
             TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
 
-        DrawChevron(g, rect, hot, nameFont);
+        TextRenderer.DrawText(g, "›", nameFont, new Rectangle(rect.Right - 30, rect.Y, 22, DividerY),
+            headerHot ? DarkTheme.AccentHover : DarkTheme.TextMuted,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+
+        _headerHits.Add((new Rectangle(rect.X, rect.Y, rect.Width, DividerY), connIndex));
+
+        using (var divider = new Pen(DarkTheme.BorderSubtle))
+            g.DrawLine(divider, rect.X + PadX, rect.Y + DividerY, rect.Right - PadX, rect.Y + DividerY);
+
+        // Body: one clickable "Sign on as …" row per saved login (connect + sign on), or a hint.
+        if (logins.Count == 0)
+        {
+            TextRenderer.DrawText(g, "(no saved logins)", loginFont,
+                new Rectangle(rect.X + PadX, rect.Y + FirstLoginY, rect.Width - PadX * 2, LoginRowH),
+                DarkTheme.TextMuted, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+            return;
+        }
+
+        for (int k = 0; k < logins.Count; k++)
+        {
+            int rowY = rect.Y + FirstLoginY + k * LoginRowH;
+            var rowRect = new Rectangle(rect.X + 6, rowY, rect.Width - 12, LoginRowH);
+            bool rowHot = _hotKind == HotKind.Login && _hotConn == connIndex && _hotLogin == k;
+            if (rowHot)
+                using (var rb = new SolidBrush(Color.FromArgb(48, DarkTheme.Accent)))
+                    FillRoundedRect(g, rb, rowRect, 5);
+
+            var (label, user) = logins[k];
+            string who = string.IsNullOrEmpty(label) ? "(default login)" : label;
+            string suffix = !string.IsNullOrEmpty(user) && !string.Equals(user, label, StringComparison.OrdinalIgnoreCase)
+                ? $"  ({user})" : "";
+            TextRenderer.DrawText(g, $"›  Sign on as {who}{suffix}", loginFont,
+                new Rectangle(rect.X + PadX, rowY, rect.Width - PadX * 2, LoginRowH),
+                rowHot ? DarkTheme.AccentHover : DarkTheme.TextPrimary,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+
+            _loginHits.Add((rowRect, connIndex, k));
+        }
     }
 
-    private void DrawQuickCard(Graphics g, Rectangle rect, QuickEntry q, bool hot, Font nameFont, Font detailFont)
-    {
-        PaintCardBackground(g, rect, hot);
-        string title = string.IsNullOrEmpty(q.Label) ? "(default login)" : q.Label;
-        TextRenderer.DrawText(g, title, nameFont,
-            new Rectangle(rect.X + 14, rect.Y + 8, rect.Width - 44, 20),
-            hot ? DarkTheme.AccentHover : DarkTheme.TextPrimary,
-            TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
-
-        string detail = string.IsNullOrEmpty(q.User)
-            ? $"on {q.Connection.DisplayName}"
-            : $"{q.User}  ·  on {q.Connection.DisplayName}";
-        TextRenderer.DrawText(g, detail, detailFont,
-            new Rectangle(rect.X + 14, rect.Y + 32, rect.Width - 44, 18), DarkTheme.TextSecondary,
-            TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
-
-        DrawChevron(g, rect, hot, nameFont);
-    }
-
-    private void DrawNewCard(Graphics g, Rectangle rect, bool hot, Font nameFont)
+    private void DrawNewButton(Graphics g, Rectangle rect, bool hot, Font font)
     {
         using var fill = new SolidBrush(hot ? Color.FromArgb(40, DarkTheme.Accent) : Color.Transparent);
         using var pen = new Pen(hot ? DarkTheme.Accent : DarkTheme.Border, hot ? 1.5f : 1f);
         FillRoundedRect(g, fill, rect, 8);
         DrawRoundedRect(g, pen, rect, 8);
-        TextRenderer.DrawText(g, "+  New connection…", nameFont, rect,
+        TextRenderer.DrawText(g, "+  New connection", font, rect,
             hot ? DarkTheme.AccentHover : DarkTheme.TextMuted,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
     }
@@ -1102,31 +1096,27 @@ internal class WelcomePanel : Control
         DrawRoundedRect(g, pen, rect, 8);
     }
 
-    private static void DrawChevron(Graphics g, Rectangle rect, bool hot, Font font) =>
-        TextRenderer.DrawText(g, "›", font, new Rectangle(rect.Right - 30, rect.Y, 22, rect.Height),
-            hot ? DarkTheme.AccentHover : DarkTheme.TextMuted,
-            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-
-    /// <summary>Which card (if any) is at a point, and its index within that column's list.</summary>
-    private (Hot kind, int index) HitTest(Point pt)
+    /// <summary>Which region (if any) is at a point: a connection header, a login row, or the New button.</summary>
+    private (HotKind Kind, int Conn, int Login) HitTest(Point pt)
     {
-        for (int i = 0; i < _connRects.Count; i++)
-            if (_connRects[i].Contains(pt)) return (Hot.Conn, i);
-        if (_newConnRect.Contains(pt)) return (Hot.New, -1);
-        for (int i = 0; i < _quickRects.Count; i++)
-            if (_quickRects[i].Contains(pt)) return (Hot.Quick, i);
-        return (Hot.None, -1);
+        foreach (var (rect, conn, login) in _loginHits)
+            if (rect.Contains(pt)) return (HotKind.Login, conn, login);
+        foreach (var (rect, conn) in _headerHits)
+            if (rect.Contains(pt)) return (HotKind.Header, conn, -1);
+        if (_newConnRect.Contains(pt)) return (HotKind.New, -1, -1);
+        return (HotKind.None, -1, -1);
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
-        var (kind, index) = HitTest(e.Location);
-        if (kind != _hotKind || index != _hotIndex)
+        var (kind, conn, login) = HitTest(e.Location);
+        if (kind != _hotKind || conn != _hotConn || login != _hotLogin)
         {
             _hotKind = kind;
-            _hotIndex = index;
-            Cursor = kind == Hot.None ? Cursors.Default : Cursors.Hand;
+            _hotConn = conn;
+            _hotLogin = login;
+            Cursor = kind == HotKind.None ? Cursors.Default : Cursors.Hand;
             Invalidate();
         }
     }
@@ -1134,10 +1124,10 @@ internal class WelcomePanel : Control
     protected override void OnMouseLeave(EventArgs e)
     {
         base.OnMouseLeave(e);
-        if (_hotKind != Hot.None)
+        if (_hotKind != HotKind.None)
         {
-            _hotKind = Hot.None;
-            _hotIndex = -1;
+            _hotKind = HotKind.None;
+            _hotConn = _hotLogin = -1;
             Cursor = Cursors.Default;
             Invalidate();
         }
@@ -1146,18 +1136,17 @@ internal class WelcomePanel : Control
     protected override void OnMouseClick(MouseEventArgs e)
     {
         base.OnMouseClick(e);
-        var (kind, index) = HitTest(e.Location);
+        var (kind, conn, login) = HitTest(e.Location);
         switch (kind)
         {
-            case Hot.Conn:
-                LaunchProfile?.Invoke(this, _connections[index]);          // connect only
+            case HotKind.Header:
+                LaunchProfile?.Invoke(this, _connections[conn]);                                     // connect, no sign-on
                 break;
-            case Hot.New:
-                ConnectClicked?.Invoke(this, EventArgs.Empty);             // new connection dialog
+            case HotKind.Login:
+                QuickSignOn?.Invoke(_connections[conn], LoginsFor(_connections[conn])[login].Label); // connect + sign on
                 break;
-            case Hot.Quick:
-                var q = _quick[index];
-                QuickSignOn?.Invoke(q.Connection, q.Label);                // connect + sign on
+            case HotKind.New:
+                ConnectClicked?.Invoke(this, EventArgs.Empty);                                        // new connection dialog
                 break;
         }
     }
