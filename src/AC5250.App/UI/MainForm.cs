@@ -908,7 +908,7 @@ internal class WelcomePanel : Control
     private Hot _hotKind = Hot.None;
     private int _hotIndex = -1;
 
-    private const int CardW = 300, CardH = 58, CardGap = 10, ColGap = 28, HeaderH = 42;
+    private const int CardW = 300, CardH = 58, CardGap = 10, ColGap = 28, HeaderH = 42, NewCardH = 32;
 
     public WelcomePanel()
     {
@@ -977,13 +977,22 @@ internal class WelcomePanel : Control
 
         int centerX = Width / 2;
 
-        // Compact header (de-emphasized so the launcher itself is the focus).
-        int y = 22;
+        // Measure the header + columns up front so the whole block can be centered vertically
+        // (rather than pinned to the top).
         var titleSize = TextRenderer.MeasureText(g, "AC5250", titleFont);
-        TextRenderer.DrawText(g, "AC5250", titleFont, new Point(centerX - titleSize.Width / 2, y), DarkTheme.Accent);
-        y += titleSize.Height + 2;
         var sub = "Aidan's Custom TN5250 Terminal Emulator";
         var subSize = TextRenderer.MeasureText(g, sub, subFont);
+
+        int leftColH = _connections.Count * (CardH + CardGap) + NewCardH;
+        int rightColH = _quick.Count > 0 ? _quick.Count * (CardH + CardGap) - CardGap : 4 * 20;
+        int headerBlockH = titleSize.Height + 2 + subSize.Height + 26;
+        int contentH = headerBlockH + HeaderH + Math.Max(leftColH, rightColH);
+
+        int y = Math.Max(20, (Height - contentH) / 2);
+
+        // Header (compact, de-emphasized so the launcher itself is the focus).
+        TextRenderer.DrawText(g, "AC5250", titleFont, new Point(centerX - titleSize.Width / 2, y), DarkTheme.Accent);
+        y += titleSize.Height + 2;
         TextRenderer.DrawText(g, sub, subFont, new Point(centerX - subSize.Width / 2, y), DarkTheme.TextSecondary);
         y += subSize.Height + 26;
 
@@ -1003,7 +1012,7 @@ internal class WelcomePanel : Control
 
         int cardsTop = y + HeaderH;
 
-        // Left column: one card per saved connection, then the "+ New connection…" card.
+        // Left column: one card per saved connection, then a thin "+ New connection…" card.
         int ly = cardsTop;
         for (int i = 0; i < _connections.Count; i++)
         {
@@ -1012,8 +1021,8 @@ internal class WelcomePanel : Control
             DrawConnectionCard(g, rect, _connections[i], _hotKind == Hot.Conn && _hotIndex == i, nameFont, detailFont);
             ly += CardH + CardGap;
         }
-        _newConnRect = new Rectangle(leftX, ly, colW, CardH);
-        DrawNewCard(g, _newConnRect, _hotKind == Hot.New, nameFont);
+        _newConnRect = new Rectangle(leftX, ly, colW, NewCardH);
+        DrawNewCard(g, _newConnRect, _hotKind == Hot.New, detailFont);
 
         // Right column: one card per saved credential (connect + sign on), or a hint if none.
         if (_quick.Count == 0)
