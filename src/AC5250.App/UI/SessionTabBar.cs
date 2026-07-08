@@ -31,6 +31,7 @@ public class SessionTabBar : Control
     private bool _detaching;
     private bool _movingWindow;                 // dragging the ONLY tab moves the whole window
     private Point _winGrab;                      // cursor offset within the window when grabbed
+    private bool _dropHighlight;                 // this bar is the hovered combine target
     private TabDragGhost? _ghost;               // floating preview shown while tearing a tab out
     private readonly System.Windows.Forms.Timer _animTimer;
     private const float EaseFactor = 0.32f;    // per-tick easing toward the target slot
@@ -85,6 +86,19 @@ public class SessionTabBar : Control
     /// <summary>Raised when a single-tab window was moved by dragging its (only) tab and
     /// released — carries the drop screen point so the shell can merge into another window.</summary>
     public event Action<Point>? WindowDragReleased;
+
+    /// <summary>Raised repeatedly while a tab/window drag is in progress (screen point), so the
+    /// shell can highlight the window that a release would combine into.</summary>
+    public event Action<Point>? TabDragOver;
+
+    /// <summary>Raised when any tab/window drag ends, so the shell can clear the highlight.</summary>
+    public event Action? TabDragEnded;
+
+    /// <summary>Show/hide the "drop here to combine" highlight on this bar.</summary>
+    public void SetDropHighlight(bool on)
+    {
+        if (_dropHighlight != on) { _dropHighlight = on; Invalidate(); }
+    }
 
     public SessionTabBar()
     {
@@ -271,6 +285,15 @@ public class SessionTabBar : Control
         const int arm = 5;
         g.DrawLine(plusPen, px - arm, py, px + arm, py);
         g.DrawLine(plusPen, px, py - arm, px, py + arm);
+
+        // "Drop here to combine" affordance: accent tint + border over the whole strip.
+        if (_dropHighlight)
+        {
+            using var tint = new SolidBrush(Color.FromArgb(46, DarkTheme.Accent));
+            g.FillRectangle(tint, ClientRectangle);
+            using var border = new Pen(DarkTheme.Accent, 2);
+            g.DrawRectangle(border, 1, 1, Width - 3, Height - 3);
+        }
     }
 
     private void DrawTab(Graphics g, int i, Rectangle rect)
@@ -404,7 +427,9 @@ public class SessionTabBar : Control
             {
                 if (f.WindowState == FormWindowState.Maximized) f.WindowState = FormWindowState.Normal;
                 f.Location = new Point(Cursor.Position.X - _winGrab.X, Cursor.Position.Y - _winGrab.Y);
+                f.Opacity = 0.85;   // see-through so a target window's combine highlight shows behind
             }
+            TabDragOver?.Invoke(Cursor.Position);
             return;
         }
 
@@ -445,6 +470,7 @@ public class SessionTabBar : Control
                 }
 
                 Cursor = Cursors.SizeAll;
+                TabDragOver?.Invoke(PointToScreen(e.Location));   // highlight a combine target
                 StartAnim();                   // the timer repaints; drives the slide/float
                 return;                        // suppress hover changes while dragging
             }
@@ -484,8 +510,9 @@ public class SessionTabBar : Control
         // over one; otherwise the window simply stays where it was dragged.
         if (_movingWindow)
         {
-            _movingWindow = false;
-            WindowDragReleased?.Invoke(PointToScreen(e.Location));
+            var pt = PointToScreen(e.Location);
+            ResetPress();                       // clears the combine highlight + restores opacity
+            WindowDragReleased?.Invoke(pt);     // shell merges if released over another window
             return;
         }
 
@@ -524,6 +551,11 @@ public class SessionTabBar : Control
 
     private void ResetPress()
     {
+        if (_dragging || _movingWindow)
+        {
+            TabDragEnded?.Invoke();                          // clear any combine-target highlight
+            if (FindForm() is { } f) f.Opacity = 1.0;        // undo the single-tab-move dimming
+        }
         _pressIndex = -1;
         _dragging = false;
         _detaching = false;

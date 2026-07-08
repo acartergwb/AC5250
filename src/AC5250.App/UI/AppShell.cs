@@ -28,6 +28,7 @@ internal sealed class AppShell : ApplicationContext
 
     private McpHost? _mcpHost;
     private MainForm? _pendingWindow;                 // window awaiting the next CreateSession
+    private MainForm? _dropTarget;                    // window currently highlighted as a drop target
 
     public SessionManager Sessions => _sessions;
     public AppSettings Settings => _settings;
@@ -116,6 +117,24 @@ internal sealed class AppShell : ApplicationContext
         {
             OpenWindowWithTab(tab, screenLocation);
         }
+    }
+
+    /// <summary>While a tab is being dragged, highlight the window a release would combine into
+    /// (the window under the cursor, if any), clearing the previously-highlighted one.</summary>
+    public void UpdateDropTarget(MainForm source, Point screenLocation)
+    {
+        var t = OtherWindowAt(source, screenLocation);
+        if (ReferenceEquals(t, _dropTarget)) return;
+        _dropTarget?.SetDropHighlight(false);
+        _dropTarget = t;
+        _dropTarget?.SetDropHighlight(true);
+    }
+
+    /// <summary>Clear the drop-target highlight when a drag ends.</summary>
+    public void ClearDropTarget()
+    {
+        _dropTarget?.SetDropHighlight(false);
+        _dropTarget = null;
     }
 
     /// <summary>A single-tab window was dragged and released: if dropped over another window,

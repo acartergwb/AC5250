@@ -85,6 +85,8 @@ internal class MainForm : Form
         _tabBar.NewTabClicked += (_, _) => OpenHomeTab();
         _tabBar.TabDetached += OnTabDetached;
         _tabBar.WindowDragReleased += pt => _shell.TryDockSingleTab(this, pt);
+        _tabBar.TabDragOver += pt => _shell.UpdateDropTarget(this, pt);
+        _tabBar.TabDragEnded += () => _shell.ClearDropTarget();
 
         _captionButtons = new CaptionButtons(this) { Dock = DockStyle.Right };
         _captionBar = new Panel { Dock = DockStyle.Top, Height = 34, BackColor = DarkTheme.Background };
@@ -598,6 +600,9 @@ internal class MainForm : Form
     /// <summary>Detach this window's only tab — used when merging a single-tab window into
     /// another. The source window is expected to close afterwards.</summary>
     internal TabContext? DetachSingleTab() => _tabs.Count > 0 ? DetachTab(_tabs[0]) : null;
+
+    /// <summary>Light up this window's tab strip as the target a dragged tab would combine into.</summary>
+    internal void SetDropHighlight(bool on) => _tabBar.SetDropHighlight(on);
 
     /// <summary>Take a tab detached from another window into this one and select it.</summary>
     internal void AdoptTab(TabContext ctx)
