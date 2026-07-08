@@ -31,7 +31,7 @@ public class SessionTabBar : Control
     private bool _detaching;
     private bool _movingWindow;                 // dragging the ONLY tab moves the whole window
     private Point _winGrab;                      // cursor offset within the window when grabbed
-    private bool _dropHighlight;                 // this bar is the hovered combine target
+    private int _dropIndex = -1;                 // insertion slot for a combine drop (-1 = none)
     private TabDragGhost? _ghost;               // floating preview shown while tearing a tab out
     private readonly System.Windows.Forms.Timer _animTimer;
     private const float EaseFactor = 0.32f;    // per-tick easing toward the target slot
@@ -94,10 +94,25 @@ public class SessionTabBar : Control
     /// <summary>Raised when any tab/window drag ends, so the shell can clear the highlight.</summary>
     public event Action? TabDragEnded;
 
-    /// <summary>Show/hide the "drop here to combine" highlight on this bar.</summary>
-    public void SetDropHighlight(bool on)
+    /// <summary>Show a Chrome-style insertion placeholder at the slot nearest the cursor, and
+    /// slide the tabs to make room, so it's clear where a combined tab will land.</summary>
+    public void SetDropTarget(Point screen)
     {
-        if (_dropHighlight != on) { _dropHighlight = on; Invalidate(); }
+        int idx = InsertionIndexAtX(PointToClient(screen).X);
+        if (idx != _dropIndex) { _dropIndex = idx; StartAnim(); Invalidate(); }
+    }
+
+    /// <summary>Remove the insertion placeholder (drag left this window or ended).</summary>
+    public void ClearDrop()
+    {
+        if (_dropIndex != -1) { _dropIndex = -1; StartAnim(); Invalidate(); }
+    }
+
+    private int InsertionIndexAtX(int localX)
+    {
+        if (_tabs.Count == 0) return 0;
+        int idx = (int)Math.Round((localX - 4) / (float)GetTabWidth());
+        return Math.Clamp(idx, 0, _tabs.Count);   // 0.._tabs.Count (last = append)
     }
 
     public SessionTabBar()
@@ -131,6 +146,18 @@ public class SessionTabBar : Control
         _tabs.Add(new TabItem { Title = title, Tag = tag });
         SelectedIndex = _tabs.Count - 1;
         StartAnim();     // existing tabs ease to their new (narrower) slots; the new one snaps in
+        Invalidate();
+    }
+
+    /// <summary>Insert a combined tab at the pending placeholder slot (set by SetDropTarget) or
+    /// append if none, select it, and clear the placeholder.</summary>
+    public void AdoptTabAtDrop(string title, object tag)
+    {
+        int idx = _dropIndex >= 0 ? Math.Min(_dropIndex, _tabs.Count) : _tabs.Count;
+        _dropIndex = -1;
+        _tabs.Insert(idx, new TabItem { Title = title, Tag = tag, AnimX = SlotX(idx) });
+        SelectedIndex = idx;
+        StartAnim();
         Invalidate();
     }
 
@@ -225,8 +252,14 @@ public class SessionTabBar : Control
         if (!_dragging && !moving) _animTimer.Stop();
     }
 
-    // While a tab is torn out, the tabs after it collapse left as if it were already gone.
-    private int VisualSlot(int i) => (_detaching && _dragging && i > _pressIndex) ? i - 1 : i;
+    // Where tab i sits for layout: collapse left past a torn-out tab (source), or shift right
+    // to open a gap for an incoming combine placeholder (target).
+    private int VisualSlot(int i)
+    {
+        if (_detaching && _dragging && i > _pressIndex) return i - 1;   // source tear-out
+        if (_dropIndex >= 0 && i >= _dropIndex) return i + 1;           // target insertion gap
+        return i;
+    }
 
     private Rectangle GetCloseRect(int index)
     {
@@ -286,13 +319,23 @@ public class SessionTabBar : Control
         g.DrawLine(plusPen, px - arm, py, px + arm, py);
         g.DrawLine(plusPen, px, py - arm, px, py + arm);
 
-        // "Drop here to combine" affordance: accent tint + border over the whole strip.
-        if (_dropHighlight)
+        // Combine affordance: a phantom tab slot at the insertion point (tabs have already slid
+        // to open the gap via VisualSlot), so it's clear exactly where a dropped tab will land.
+        if (_dropIndex >= 0)
         {
-            using var tint = new SolidBrush(Color.FromArgb(46, DarkTheme.Accent));
-            g.FillRectangle(tint, ClientRectangle);
-            using var border = new Pen(DarkTheme.Accent, 2);
-            g.DrawRectangle(border, 1, 1, Width - 3, Height - 3);
+            int w = GetTabWidth();
+            var r = new Rectangle(SlotX(_dropIndex) + 2, 3, Math.Max(12, w - 4), TabHeight - 5);
+            using var path = new System.Drawing.Drawing2D.GraphicsPath();
+            int d = 12;
+            path.AddArc(r.X, r.Y, d, d, 180, 90);
+            path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+            path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            using var fill = new SolidBrush(Color.FromArgb(48, DarkTheme.Accent));
+            using var pen = new Pen(DarkTheme.Accent, 2);
+            g.FillPath(fill, path);
+            g.DrawPath(pen, path);
         }
     }
 
@@ -511,8 +554,8 @@ public class SessionTabBar : Control
         if (_movingWindow)
         {
             var pt = PointToScreen(e.Location);
-            ResetPress();                       // clears the combine highlight + restores opacity
-            WindowDragReleased?.Invoke(pt);     // shell merges if released over another window
+            WindowDragReleased?.Invoke(pt);     // merge first (uses the target's placeholder slot)
+            ResetPress();                       // then clear the placeholder + restore opacity
             return;
         }
 
@@ -527,9 +570,9 @@ public class SessionTabBar : Control
             if (droppedOffWindow || draggedBelowStrip)
             {
                 int idx = _pressIndex;
-                ResetPress();
                 Cursor = Cursors.Default;
-                TabDetached?.Invoke(idx, screenPt);
+                TabDetached?.Invoke(idx, screenPt);   // merge (target placeholder) or new window
+                ResetPress();                          // then clear the placeholder/ghost
                 return;
             }
         }

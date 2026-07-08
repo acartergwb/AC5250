@@ -601,8 +601,9 @@ internal class MainForm : Form
     /// another. The source window is expected to close afterwards.</summary>
     internal TabContext? DetachSingleTab() => _tabs.Count > 0 ? DetachTab(_tabs[0]) : null;
 
-    /// <summary>Light up this window's tab strip as the target a dragged tab would combine into.</summary>
-    internal void SetDropHighlight(bool on) => _tabBar.SetDropHighlight(on);
+    /// <summary>Show/move the combine insertion placeholder in this window's tab strip.</summary>
+    internal void SetDropTarget(Point screen) => _tabBar.SetDropTarget(screen);
+    internal void ClearDrop() => _tabBar.ClearDrop();
 
     /// <summary>Take a tab detached from another window into this one and select it.</summary>
     internal void AdoptTab(TabContext ctx)
@@ -610,7 +611,7 @@ internal class MainForm : Form
         _tabs.Add(ctx);
         _terminalPanel.Controls.Add(ctx.Content);
         string title = ctx.Session is { } s ? s.Title : "Home";
-        _tabBar.AddTab(title, ctx);   // selects -> OnTabChanged -> ActivateTab
+        _tabBar.AdoptTabAtDrop(title, ctx);   // inserts at the placeholder slot (or appends) + selects
     }
 
     private void ActivateTab(TabContext ctx)

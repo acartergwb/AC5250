@@ -124,16 +124,14 @@ internal sealed class AppShell : ApplicationContext
     public void UpdateDropTarget(MainForm source, Point screenLocation)
     {
         var t = OtherWindowAt(source, screenLocation);
-        if (ReferenceEquals(t, _dropTarget)) return;
-        _dropTarget?.SetDropHighlight(false);
-        _dropTarget = t;
-        _dropTarget?.SetDropHighlight(true);
+        if (!ReferenceEquals(t, _dropTarget)) { _dropTarget?.ClearDrop(); _dropTarget = t; }
+        _dropTarget?.SetDropTarget(screenLocation);   // move the placeholder as the cursor moves
     }
 
-    /// <summary>Clear the drop-target highlight when a drag ends.</summary>
+    /// <summary>Clear the drop placeholder when a drag ends.</summary>
     public void ClearDropTarget()
     {
-        _dropTarget?.SetDropHighlight(false);
+        _dropTarget?.ClearDrop();
         _dropTarget = null;
     }
 
