@@ -15,12 +15,10 @@ internal class MainForm : Form
     private const int DWMWA_CAPTION_COLOR = 35;
     private const int DWMWA_BORDER_COLOR = 34;
 
-    // Custom title bar (borderless window; we draw the caption strip and manage drag/resize).
-    [DllImport("user32.dll")] private static extern bool ReleaseCapture();
-    [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr w, IntPtr l);
-    [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hWnd, int flags);
-    [DllImport("user32.dll")] private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO mi);
-    private const int BorderPx = 6;   // resize-grip thickness / visible frame (0 when maximized)
+    // Custom title bar: keep the native sizing frame (thin border + native resize/snap/maximize)
+    // but reclaim the caption area for our own tab strip via WM_NCCALCSIZE. No client padding,
+    // so there's no visible gray border.
+    [DllImport("user32.dll")] private static extern IntPtr DefWindowProc(IntPtr hWnd, int msg, IntPtr w, IntPtr l);
 
     private readonly AppShell _shell;
     private readonly SessionManager _sessionManager;
@@ -68,11 +66,10 @@ internal class MainForm : Form
         ForeColor = DarkTheme.TextPrimary;
         Font = DarkTheme.UIFont;
 
-        // Chrome-style custom frame: no native title bar. The caption strip (tabs + window
-        // buttons) sits at the very top, the menu below it, then the terminal. WndProc adds the
-        // resize grips + maximize bounds; the tab bar's empty area drags the window.
-        FormBorderStyle = FormBorderStyle.None;
-        Padding = new Padding(BorderPx);
+        // Chrome-style custom frame: the native title bar is removed in WndProc (WM_NCCALCSIZE)
+        // while the native sizing frame is kept, so the caption strip (tabs + window buttons)
+        // sits at the very top with the menu below and the terminal beneath — and there's no
+        // gray client border. FormBorderStyle stays the default Sizable.
 
         // Menu
         _menu = CreateMenu();
@@ -727,65 +724,39 @@ internal class MainForm : Form
         catch { return null; }
     }
 
-    // ---- custom-frame plumbing (borderless window with manual resize/drag/maximize) --------
+    // ---- custom-frame plumbing (native sizing frame, caption reclaimed for our tab strip) ---
 
     protected override void WndProc(ref Message m)
     {
-        const int WM_NCHITTEST = 0x0084, WM_GETMINMAXINFO = 0x0024;
-        const int HTCLIENT = 1, HTLEFT = 10, HTRIGHT = 11, HTTOP = 12, HTTOPLEFT = 13,
-                  HTTOPRIGHT = 14, HTBOTTOM = 15, HTBOTTOMLEFT = 16, HTBOTTOMRIGHT = 17;
+        const int WM_NCCALCSIZE = 0x0083;
 
-        if (m.Msg == WM_NCHITTEST)
+        if (m.Msg == WM_NCCALCSIZE && m.WParam != IntPtr.Zero)
         {
-            base.WndProc(ref m);
-            // Turn the outer few pixels into native resize grips (only when not maximized).
-            if ((int)m.Result == HTCLIENT && WindowState != FormWindowState.Maximized)
-            {
-                var p = PointToClient(Cursor.Position);
-                int g = BorderPx + 2;
-                bool l = p.X <= g, r = p.X >= ClientSize.Width - g, t = p.Y <= g, b = p.Y >= ClientSize.Height - g;
-                m.Result = (IntPtr)(t && l ? HTTOPLEFT : t && r ? HTTOPRIGHT : b && l ? HTBOTTOMLEFT
-                    : b && r ? HTBOTTOMRIGHT : l ? HTLEFT : r ? HTRIGHT : t ? HTTOP : b ? HTBOTTOM : HTCLIENT);
-            }
+            // rgrc[0] (first RECT at lParam) is the proposed window rect. Let Windows apply its
+            // default frame (adds the native resize borders + caption inset), then give the
+            // caption height back to the client so our tab strip fills the top. The native side/
+            // bottom sizing borders remain, so resize + snap + maximize all stay native — and
+            // there's no client padding, so no gray border. When maximized we keep the default
+            // top inset (otherwise the top would be clipped off-screen).
+            int originalTop = Marshal.PtrToStructure<RECT>(m.LParam).top;
+            DefWindowProc(m.HWnd, m.Msg, m.WParam, m.LParam);
+            var r = Marshal.PtrToStructure<RECT>(m.LParam);
+            if (WindowState != FormWindowState.Maximized) r.top = originalTop;
+            Marshal.StructureToPtr(r, m.LParam, false);
+            m.Result = IntPtr.Zero;
             return;
         }
 
-        if (m.Msg == WM_GETMINMAXINFO)
-            AdjustMaximizedBounds(m.LParam);
-
         base.WndProc(ref m);
-    }
-
-    // A borderless window maximizes over the taskbar unless clamped to the monitor work area.
-    private void AdjustMaximizedBounds(IntPtr lParam)
-    {
-        var mmi = Marshal.PtrToStructure<MINMAXINFO>(lParam);
-        IntPtr mon = MonitorFromWindow(Handle, 2 /*MONITOR_DEFAULTTONEAREST*/);
-        var mi = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
-        if (GetMonitorInfo(mon, ref mi))
-        {
-            mmi.ptMaxPosition.x = mi.rcWork.left - mi.rcMonitor.left;
-            mmi.ptMaxPosition.y = mi.rcWork.top - mi.rcMonitor.top;
-            mmi.ptMaxSize.x = mi.rcWork.right - mi.rcWork.left;
-            mmi.ptMaxSize.y = mi.rcWork.bottom - mi.rcWork.top;
-            Marshal.StructureToPtr(mmi, lParam, false);
-        }
     }
 
     protected override void OnResize(EventArgs e)
     {
         base.OnResize(e);
-        // No visible frame padding when maximized (fills the work area edge-to-edge).
-        Padding = WindowState == FormWindowState.Maximized ? new Padding(0) : new Padding(BorderPx);
         _captionButtons?.Invalidate();   // refresh the max/restore glyph
     }
 
-    [StructLayout(LayoutKind.Sequential)] private struct POINTL { public int x, y; }
     [StructLayout(LayoutKind.Sequential)] private struct RECT { public int left, top, right, bottom; }
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MINMAXINFO { public POINTL ptReserved, ptMaxSize, ptMaxPosition, ptMinTrackSize, ptMaxTrackSize; }
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MONITORINFO { public int cbSize; public RECT rcMonitor, rcWork; public int dwFlags; }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
