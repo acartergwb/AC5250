@@ -74,4 +74,20 @@ public static class ConnectionStore
         Save(list);
         return list;
     }
+
+    /// <summary>The saved connection matching an endpoint — used to associate an ad-hoc or
+    /// MCP-initiated session (which carries no saved-connection id) with a saved connection so
+    /// its credentials resolve. Prefers an exact host+port+device match, then host+port.</summary>
+    public static ConnectionSettings? FindByEndpoint(string host, int port, string? device)
+    {
+        ConnectionSettings? hostPort = null;
+        foreach (var c in Load())
+        {
+            if (!string.Equals(c.HostName, host, StringComparison.OrdinalIgnoreCase) || c.Port != port) continue;
+            if (!string.IsNullOrEmpty(device) && string.Equals(c.DeviceName, device, StringComparison.OrdinalIgnoreCase))
+                return c;                 // exact device match wins
+            hostPort ??= c;
+        }
+        return hostPort;
+    }
 }

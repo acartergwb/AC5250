@@ -384,44 +384,36 @@ internal class MainForm : Form
             s.HandleKeyAction(enter);
     }
 
-    /// <summary>Pick the saved credential to sign on with for the active session: credentials
-    /// bound to its saved connection first (by connection id), then host-scoped credentials
-    /// (which also covers ad-hoc/MCP sessions that were never saved). Prompts when a scope has
-    /// more than one. Returns null — after messaging the user or on cancel — when none resolve.</summary>
+    /// <summary>Pick the saved credential to sign on with for the active session. Credentials are
+    /// bound to a saved connection: the session's own connection id, or — for an ad-hoc connection
+    /// to a known host — a saved connection matched by endpoint. Prompts when the connection has
+    /// more than one login. Returns null (after messaging the user, or on cancel) when none resolve.</summary>
     private (string User, string Password)? ResolveSignOnCredential(TerminalSession s)
     {
-        string connId = s.Settings.Id ?? "";
-        if (!string.IsNullOrEmpty(connId))
-        {
-            var labels = CredentialStore.LabelsForConnection(connId);
-            if (labels.Count > 0)
-            {
-                string? label = labels.Count == 1
-                    ? labels[0]
-                    : CredentialPicker.Choose(this, s.Settings.DisplayName, labels);
-                if (label == null) return null;   // user cancelled the picker
-                var c = CredentialStore.GetForConnection(connId, label);
-                if (c != null) return c;
-            }
-        }
+        string? connId = string.IsNullOrEmpty(s.Settings.Id)
+            ? ConnectionStore.FindByEndpoint(s.Settings.HostName, s.Settings.Port, s.Settings.DeviceName)?.Id
+            : s.Settings.Id;
 
-        // Host fallback (legacy host-scoped creds, env vars, MCP-created sessions).
-        string host = s.Settings.HostName;
-        var hlabels = CredentialStore.Labels(host);
-        if (hlabels.Count == 0)
+        var labels = string.IsNullOrEmpty(connId)
+            ? (IReadOnlyList<string>)Array.Empty<string>()
+            : CredentialStore.LabelsForConnection(connId);
+
+        if (labels.Count == 0)
         {
             MessageBox.Show(
                 $"No saved credentials for '{s.Settings.DisplayName}'.\nAdd them via Session > Manage Saved Credentials.",
                 "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return null;
         }
-        string? hlabel = hlabels.Count == 1 ? null : CredentialPicker.Choose(this, host, hlabels);
-        if (hlabels.Count > 1 && hlabel == null) return null;   // cancelled
-        var hc = CredentialStore.Get(host, hlabel);
-        if (hc is null)
-            MessageBox.Show($"Could not read the saved credential for '{host}'.",
+
+        string? label = labels.Count == 1 ? labels[0] : CredentialPicker.Choose(this, s.Settings.DisplayName, labels);
+        if (label == null) return null;   // user cancelled the picker
+
+        var creds = CredentialStore.GetForConnection(connId!, label);
+        if (creds is null)
+            MessageBox.Show($"Could not read the saved credential for '{s.Settings.DisplayName}'.",
                 "AC5250", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        return hc;
+        return creds;
     }
 
     private void OnToggleMcpStartup(object? sender, EventArgs e)

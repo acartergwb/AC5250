@@ -66,6 +66,20 @@ internal sealed class AppShell : ApplicationContext
         _sessions.SessionAdded += OnSessionAdded;
         _sessions.SessionRemoved += OnSessionRemoved;
 
+        // One-time: move legacy host-scoped credentials onto their saved connections and delete
+        // the old host entries. Connection-scoped storage is the only model now. Idempotent, and
+        // best-effort: the copies happen before the purge, so a failure leaves the originals
+        // intact for a retry and must never block startup.
+        if (OperatingSystem.IsWindows())
+        {
+            try
+            {
+                AC5250.Security.CredentialStore.MigrateHostCredentialsToConnections(
+                    ConnectionStore.Load().Select(c => (c.Id, c.HostName)));
+            }
+            catch { /* leave legacy creds in place; retry next launch */ }
+        }
+
         OpenWindow();                                  // first window
 
         if (_mcpStartup?.AutoStart == true || _settings.StartMcpOnStartup)

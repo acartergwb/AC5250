@@ -240,6 +240,66 @@ public static class CredentialStore
     public static void SetDefaultLabelForConnection(string connId, string label)
         => Write(ConnMarkerTarget(connId), CleanLabel(label), ""); // label in user field, no password
 
+    // --- one-time migration: host-scoped -> connection-scoped ---------------------------
+    // Earlier versions stored credentials per host (AC5250:{host}:{label}); now they belong to a
+    // saved connection. Move each host credential onto every saved connection that uses that host
+    // (preserving the password and default marker), then delete the legacy host entries.
+
+    /// <summary>Migrate legacy host-scoped credentials onto matching saved connections, then
+    /// purge all legacy host entries. Idempotent — after the first run nothing is left to move.
+    /// Returns how many credentials were copied onto connections.</summary>
+    public static int MigrateHostCredentialsToConnections(IEnumerable<(string Id, string Host)> connections)
+    {
+        // Snapshot the legacy host credentials (host, label) currently in the vault.
+        var hostCreds = new List<(string Host, string Label)>();
+        foreach (var (target, _) in EnumerateUserNames(CredPrefix + "*"))   // AC5250:{host}:{label} or bare AC5250:{host}
+        {
+            string rest = target[CredPrefix.Length..];
+            int colon = rest.IndexOf(':');
+            hostCreds.Add(colon < 0 ? (rest, DefaultLabel) : (rest[..colon], rest[(colon + 1)..]));
+        }
+        if (hostCreds.Count == 0) return 0;
+
+        // Group saved-connection ids by host.
+        var connsByHost = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (id, host) in connections)
+        {
+            if (string.IsNullOrEmpty(id)) continue;
+            string h = Host(host);
+            if (!connsByHost.TryGetValue(h, out var ids)) connsByHost[h] = ids = new();
+            ids.Add(id);
+        }
+
+        int moved = 0;
+        foreach (var (host, label) in hostCreds)
+        {
+            var pair = Get(host, label);
+            if (pair is null) continue;
+            bool isDefault = string.Equals(GetDefaultLabel(host), label, StringComparison.OrdinalIgnoreCase);
+            if (!connsByHost.TryGetValue(Host(host), out var connIds)) continue;
+
+            foreach (var connId in connIds)
+            {
+                if (GetForConnection(connId, label) is not null) continue;   // don't clobber an existing entry
+                SaveForConnection(connId, label, pair.Value.User, pair.Value.Password);
+                if (isDefault) SetDefaultLabelForConnection(connId, label);
+                moved++;
+            }
+        }
+
+        PurgeLegacyHostCredentials();
+        return moved;
+    }
+
+    /// <summary>Delete every legacy host-scoped credential and default marker from the vault.</summary>
+    public static void PurgeLegacyHostCredentials()
+    {
+        foreach (var (target, _) in EnumerateUserNames(CredPrefix + "*"))          // AC5250:{host}...
+            CredDeleteW(target, CRED_TYPE_GENERIC, 0);
+        foreach (var (target, _) in EnumerateUserNames(DefaultMarkerPrefix + "*")) // AC5250$def:{host}
+            CredDeleteW(target, CRED_TYPE_GENERIC, 0);
+    }
+
     // --- P/Invoke helpers ---
 
     private static void Write(string target, string user, string password)
