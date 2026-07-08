@@ -15,14 +15,16 @@ static class Program
         // launched from a Velopack install (e.g. the single-file debug/test build).
         VelopackApp.Build().Run();
 
-        // Update on launch from GitHub Releases. Best-effort: an update problem (offline,
-        // transient) must never stop the app from starting.
-        try { UpdateOnLaunch(); }
-        catch { /* start anyway */ }
-
+        // Init WinForms before the update so the progress splash renders themed + DPI-correct.
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+
+        // Update on launch from GitHub Releases, showing a progress splash so the user isn't
+        // staring at a blank screen while it checks + downloads. Best-effort: an update problem
+        // (offline, transient) must never stop the app from starting.
+        try { UpdateOnLaunch(); }
+        catch { /* start anyway */ }
 
         // Run an app context (not a single form) so the app lives until the LAST window
         // closes. The shell owns the shared SessionManager + MCP host across all windows.
@@ -36,10 +38,10 @@ static class Program
         // Only when running from an installed copy — the raw exe has nothing to update.
         if (!mgr.IsInstalled) return;
 
-        var updates = mgr.CheckForUpdatesAsync().GetAwaiter().GetResult();
-        if (updates == null) return; // already on the latest release
-
-        mgr.DownloadUpdatesAsync(updates).GetAwaiter().GetResult();
-        mgr.ApplyUpdatesAndRestart(updates); // swaps to the new version and relaunches
+        // The splash runs the whole check/download/apply flow on its own message loop, showing a
+        // real progress bar. It closes (and Run returns) when there's no update or on error; when
+        // an update is applied it relaunches the process, so Run never returns here.
+        using var splash = new UpdateSplashForm(mgr);
+        Application.Run(splash);
     }
 }
