@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using AC5250.Session;
 
 namespace AC5250.UI;
@@ -42,6 +43,9 @@ public class SessionTabBar : Control
     }
 
     private void HideGhost() => _ghost?.Hide();
+
+    [DllImport("user32.dll")] private static extern bool ReleaseCapture();
+    [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr w, IntPtr l);
 
     private const int TabHeight = 34;
     private const int TabPadding = 16;
@@ -363,6 +367,14 @@ public class SessionTabBar : Control
                 _grabDX = e.X - SlotX(i);   // where inside the tab it was grabbed
                 return;
             }
+        }
+
+        // Empty strip area → drag the window (this bar is the custom title bar). Enables the
+        // native move loop, so Aero snap works too.
+        if (FindForm() is { } form)
+        {
+            ReleaseCapture();
+            SendMessage(form.Handle, 0x00A1 /*WM_NCLBUTTONDOWN*/, (IntPtr)2 /*HTCAPTION*/, IntPtr.Zero);
         }
     }
 

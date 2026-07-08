@@ -15,9 +15,18 @@ internal class MainForm : Form
     private const int DWMWA_CAPTION_COLOR = 35;
     private const int DWMWA_BORDER_COLOR = 34;
 
+    // Custom title bar (borderless window; we draw the caption strip and manage drag/resize).
+    [DllImport("user32.dll")] private static extern bool ReleaseCapture();
+    [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hWnd, int flags);
+    [DllImport("user32.dll")] private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO mi);
+    private const int BorderPx = 6;   // resize-grip thickness / visible frame (0 when maximized)
+
     private readonly AppShell _shell;
     private readonly SessionManager _sessionManager;
     private readonly SessionTabBar _tabBar;
+    private Panel _captionBar = null!;
+    private CaptionButtons _captionButtons = null!;
     private readonly Panel _terminalPanel;
     private readonly MenuStrip _menu;
 
@@ -59,18 +68,27 @@ internal class MainForm : Form
         ForeColor = DarkTheme.TextPrimary;
         Font = DarkTheme.UIFont;
 
-        ApplyDarkTitleBar();
+        // Chrome-style custom frame: no native title bar. The caption strip (tabs + window
+        // buttons) sits at the very top, the menu below it, then the terminal. WndProc adds the
+        // resize grips + maximize bounds; the tab bar's empty area drags the window.
+        FormBorderStyle = FormBorderStyle.None;
+        Padding = new Padding(BorderPx);
 
         // Menu
         _menu = CreateMenu();
         MainMenuStrip = _menu;
 
-        // Tab bar
-        _tabBar = new SessionTabBar();
+        // Tab bar — fills the caption strip, left of the window buttons.
+        _tabBar = new SessionTabBar { Dock = DockStyle.Fill };
         _tabBar.SelectedIndexChanged += OnTabChanged;
         _tabBar.TabCloseClicked += OnTabClose;
         _tabBar.NewTabClicked += (_, _) => OpenHomeTab();
         _tabBar.TabDetached += OnTabDetached;
+
+        _captionButtons = new CaptionButtons(this) { Dock = DockStyle.Right };
+        _captionBar = new Panel { Dock = DockStyle.Top, Height = 34, BackColor = DarkTheme.Background };
+        _captionBar.Controls.Add(_captionButtons);   // Right
+        _captionBar.Controls.Add(_tabBar);           // Fill (added last so it takes the remainder)
 
         // Terminal panel
         _terminalPanel = new Panel
@@ -80,10 +98,11 @@ internal class MainForm : Form
             Padding = new Padding(2, 0, 2, 2),
         };
 
-        // Add in correct order (Fill must be added first)
+        // Add order: Fill first, then Top controls inner→outer (menu below the caption strip,
+        // caption strip at the very top).
         Controls.Add(_terminalPanel);
-        Controls.Add(_tabBar);
         Controls.Add(_menu);
+        Controls.Add(_captionBar);
 
         // SessionManager events are handled centrally by the AppShell, which routes each
         // session to the owning window (this form exposes PlaceSessionTab/Handle* for it).
@@ -692,6 +711,66 @@ internal class MainForm : Form
         }
         catch { return null; }
     }
+
+    // ---- custom-frame plumbing (borderless window with manual resize/drag/maximize) --------
+
+    protected override void WndProc(ref Message m)
+    {
+        const int WM_NCHITTEST = 0x0084, WM_GETMINMAXINFO = 0x0024;
+        const int HTCLIENT = 1, HTLEFT = 10, HTRIGHT = 11, HTTOP = 12, HTTOPLEFT = 13,
+                  HTTOPRIGHT = 14, HTBOTTOM = 15, HTBOTTOMLEFT = 16, HTBOTTOMRIGHT = 17;
+
+        if (m.Msg == WM_NCHITTEST)
+        {
+            base.WndProc(ref m);
+            // Turn the outer few pixels into native resize grips (only when not maximized).
+            if ((int)m.Result == HTCLIENT && WindowState != FormWindowState.Maximized)
+            {
+                var p = PointToClient(Cursor.Position);
+                int g = BorderPx + 2;
+                bool l = p.X <= g, r = p.X >= ClientSize.Width - g, t = p.Y <= g, b = p.Y >= ClientSize.Height - g;
+                m.Result = (IntPtr)(t && l ? HTTOPLEFT : t && r ? HTTOPRIGHT : b && l ? HTBOTTOMLEFT
+                    : b && r ? HTBOTTOMRIGHT : l ? HTLEFT : r ? HTRIGHT : t ? HTTOP : b ? HTBOTTOM : HTCLIENT);
+            }
+            return;
+        }
+
+        if (m.Msg == WM_GETMINMAXINFO)
+            AdjustMaximizedBounds(m.LParam);
+
+        base.WndProc(ref m);
+    }
+
+    // A borderless window maximizes over the taskbar unless clamped to the monitor work area.
+    private void AdjustMaximizedBounds(IntPtr lParam)
+    {
+        var mmi = Marshal.PtrToStructure<MINMAXINFO>(lParam);
+        IntPtr mon = MonitorFromWindow(Handle, 2 /*MONITOR_DEFAULTTONEAREST*/);
+        var mi = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
+        if (GetMonitorInfo(mon, ref mi))
+        {
+            mmi.ptMaxPosition.x = mi.rcWork.left - mi.rcMonitor.left;
+            mmi.ptMaxPosition.y = mi.rcWork.top - mi.rcMonitor.top;
+            mmi.ptMaxSize.x = mi.rcWork.right - mi.rcWork.left;
+            mmi.ptMaxSize.y = mi.rcWork.bottom - mi.rcWork.top;
+            Marshal.StructureToPtr(mmi, lParam, false);
+        }
+    }
+
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        // No visible frame padding when maximized (fills the work area edge-to-edge).
+        Padding = WindowState == FormWindowState.Maximized ? new Padding(0) : new Padding(BorderPx);
+        _captionButtons?.Invalidate();   // refresh the max/restore glyph
+    }
+
+    [StructLayout(LayoutKind.Sequential)] private struct POINTL { public int x, y; }
+    [StructLayout(LayoutKind.Sequential)] private struct RECT { public int left, top, right, bottom; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MINMAXINFO { public POINTL ptReserved, ptMaxSize, ptMaxPosition, ptMinTrackSize, ptMaxTrackSize; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MONITORINFO { public int cbSize; public RECT rcMonitor, rcWork; public int dwFlags; }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
