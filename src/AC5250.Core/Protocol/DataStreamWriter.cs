@@ -74,11 +74,23 @@ public static class DataStreamWriter
     /// </summary>
     public static byte[] BuildSaveScreenResponse(ScreenBuffer screen)
     {
+        // The saved image must establish its OWN dimensions: the host stores this stream and
+        // replays it verbatim on Restore, into whatever size the screen happens to be then. If
+        // it carries no Clear Unit, a 27x132 screen saved and later restored into a 24x80 screen
+        // (e.g. after signing off back toward the 24x80 sign-on) is written with the wrong row
+        // stride — every row wraps at column 80 instead of 132 and the whole screen slides
+        // ("jumbled"). Prefix the matching Clear Unit so the replay resizes first.
+        byte clearCmd = (screen.Rows > 24 || screen.Cols > 80)
+            ? TelnetConstants.CMD_CLEAR_UNIT_ALT   // 27x132 (wide)
+            : TelnetConstants.CMD_CLEAR_UNIT;      // 24x80
+
         var data = new List<byte>(screen.Rows * screen.Cols + 32)
         {
             // Header, opcode 0x04 (save screen)
             0x00, 0x00, 0x12, 0xA0, 0x00, 0x00, 0x04, 0x00, 0x00, 0x04,
-            // Write-To-Display (ESC + WTD) + control chars, then home the buffer
+            // Clear Unit first so the replay re-establishes the saved screen's size,
+            // then Write-To-Display (ESC + WTD) + control chars, then home the buffer.
+            0x04, clearCmd,
             0x04, TelnetConstants.CMD_WRITE_TO_DISPLAY, 0x00, 0x00,
             TelnetConstants.ORDER_SBA, 0x01, 0x01,
         };
