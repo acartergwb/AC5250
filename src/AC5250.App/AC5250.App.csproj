@@ -8,7 +8,7 @@
     <RootNamespace>AC5250</RootNamespace>
     <AssemblyName>AC5250</AssemblyName>
     <!-- Baseline for local builds; the release workflow overrides with -p:Version=<tag>. -->
-    <Version>4.2.1</Version>
+    <Version>4.2.2</Version>
     <!-- Sets the .exe icon (taskbar, Explorer, and the base for the Velopack shortcut). -->
     <ApplicationIcon>AC5250.ico</ApplicationIcon>
   </PropertyGroup>
