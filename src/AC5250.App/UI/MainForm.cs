@@ -117,12 +117,21 @@ internal class MainForm : Form
     {
         var welcome = new WelcomePanel { Dock = DockStyle.Fill, Visible = false };
         var ctx = new TabContext { Content = welcome };
-        welcome.ConnectClicked += (_, _) => StartConnectFlow(ctx);           // "+ New connection" / Connect
-        welcome.LaunchProfile += (_, settings) => StartSessionInTab(ctx, settings); // launch a saved connection (no sign-on)
-        welcome.QuickSignOn += (settings, label) => StartQuickSignOn(ctx, settings, label); // connect + sign on
+        WireHome(ctx, welcome);
         _terminalPanel.Controls.Add(welcome);
         _tabs.Add(ctx);
         _tabBar.AddTab("Home", ctx);   // selects the tab -> OnTabChanged -> ActivateTab
+    }
+
+    /// <summary>Wire a Home tab's WelcomePanel buttons to THIS window. Separate from OpenHomeTab
+    /// because a Home tab dragged into another window must be re-wired to its new owner — the
+    /// original closures capture the window that created it, so connecting from a moved tab would
+    /// otherwise drive the old window and blank the new one (see AdoptTab).</summary>
+    private void WireHome(TabContext ctx, WelcomePanel welcome)
+    {
+        welcome.ConnectClicked += (_, _) => StartConnectFlow(ctx);           // "+ New connection" / Connect
+        welcome.LaunchProfile += (_, settings) => StartSessionInTab(ctx, settings); // launch a saved connection (no sign-on)
+        welcome.QuickSignOn += (settings, label) => StartQuickSignOn(ctx, settings, label); // connect + sign on
     }
 
     /// <summary>Prompt for connection details, then bring the connection up in the given tab.</summary>
@@ -690,6 +699,15 @@ internal class MainForm : Form
     {
         _tabs.Add(ctx);
         _terminalPanel.Controls.Add(ctx.Content);
+        // A Home tab's connect buttons were wired to the SOURCE window; re-point them at THIS
+        // window. Without this, connecting from a dragged-out Home tab drives the old window
+        // (stealing its session) and leaves the new window blank. Session tabs need no rewiring —
+        // their TerminalControl handlers act on the session, not the window.
+        if (ctx.IsHome && ctx.Content is WelcomePanel welcome)
+        {
+            welcome.ClearHandlers();
+            WireHome(ctx, welcome);
+        }
         string title = ctx.Session is { } s ? s.Title : "Home";
         _tabBar.AdoptTabAtDrop(title, ctx);   // inserts at the placeholder slot (or appends) + selects
     }
@@ -880,6 +898,15 @@ internal class WelcomePanel : Control
     public event EventHandler? ConnectClicked;                    // "+ New connection"
     public event EventHandler<ConnectionSettings>? LaunchProfile; // left card: connect only
     public event Action<ConnectionSettings, string>? QuickSignOn; // right card: connect + sign on as (label)
+
+    /// <summary>Drop all subscribers so the owning window can re-wire the buttons after this
+    /// Home tab is moved to another window (see MainForm.AdoptTab / WireHome).</summary>
+    public void ClearHandlers()
+    {
+        ConnectClicked = null;
+        LaunchProfile = null;
+        QuickSignOn = null;
+    }
 
     private static readonly List<(string Label, string User)> NoLogins = new();
 
