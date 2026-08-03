@@ -203,7 +203,8 @@ internal class MainForm : Form
         menu.Items.Add(toolsMenu);
 
         var helpMenu = CreateMenuItem("&Help");
-        helpMenu.DropDownItems.Add(CreateMenuItem("&Key Mappings", Keys.F1, OnKeyMappings));
+        // No shortcut key: F1 is a 5250 AID key and must reach the terminal, not open help.
+        helpMenu.DropDownItems.Add(CreateMenuItem("&Key Mappings", onClick: OnKeyMappings));
         helpMenu.DropDownItems.Add(new ToolStripSeparator());
         helpMenu.DropDownItems.Add(CreateMenuItem("&About AC5250", onClick: OnAbout));
         menu.Items.Add(helpMenu);

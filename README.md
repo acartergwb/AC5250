@@ -60,7 +60,8 @@ dotnet build AC5250.slnx -c Debug
 dotnet run --project src/AC5250.App
 ```
 
-`Ctrl+N` to connect; `F1` for the 5250 key map.
+`Ctrl+N` to connect; Help ▸ Key Mappings for the 5250 key map. (`F1` is deliberately
+unbound — it passes through to the host as the 5250 F1 AID key.)
 
 ---
 
