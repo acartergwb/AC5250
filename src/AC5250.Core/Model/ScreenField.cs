@@ -8,6 +8,13 @@ public class ScreenField
     public FieldAttribute Attribute { get; set; } = new();
     public bool Modified { get; set; }
 
+    /// <summary>The <see cref="ScreenBuffer.WriteGeneration"/> in effect when the host defined
+    /// this field. Lets the parser tell fields the CURRENT write created from ones left over
+    /// from an earlier write — the difference between a full repaint and a pop-up window
+    /// painted over a screen whose format table survived. See
+    /// <see cref="ScreenBuffer.GetFirstNewInputField"/>.</summary>
+    public long Generation { get; set; }
+
     private readonly byte[] _data;
     private readonly int _cols;
 
