@@ -41,6 +41,19 @@ public class ScreenBuffer
     // the host left the cursor to us and we home it to the field start (ACS behavior).
     public bool CursorAddressed { get; set; }
 
+    /// <summary>
+    /// Bumped once per host write record (see <see cref="BeginWrite"/>). Every field defined
+    /// while it holds a given value carries that value, so the parser can distinguish the
+    /// fields THIS write created from ones that survived from an earlier one.
+    /// </summary>
+    public long WriteGeneration { get; private set; }
+
+    /// <summary>Start a new host write record. Call once per output record, before parsing it.</summary>
+    public void BeginWrite() => WriteGeneration++;
+
+    /// <summary>True if the host defined this field during the write currently being parsed.</summary>
+    public bool IsFromCurrentWrite(ScreenField field) => field.Generation == WriteGeneration;
+
     public event Action? ScreenChanged;
 
     /// <summary>
@@ -224,7 +237,7 @@ public class ScreenBuffer
         // objects, leaving a stale input box on screen that never clears.
         Fields.RemoveAll(f => f.Row == _bufferRow && f.Col == _bufferCol);
 
-        var field = new ScreenField(_bufferRow, _bufferCol, length, attr, Cols);
+        var field = new ScreenField(_bufferRow, _bufferCol, length, attr, Cols) { Generation = WriteGeneration };
         Fields.Add(field);
 
         // Leave the buffer at the field's first data position. In 5250 the field's
@@ -371,6 +384,31 @@ public class ScreenBuffer
             if (dist < bestDist)
             {
                 bestDist = dist;
+                best = field;
+            }
+        }
+        return best;
+    }
+
+    /// <summary>
+    /// The first enterable field (in buffer order) that the CURRENT write defined, or null if
+    /// this write defined none. A pop-up window is painted over a screen whose format table is
+    /// not always cleared, so the old screen's fields stay enterable alongside the window's —
+    /// this is how the parser finds the window's own first field rather than one underneath it.
+    /// </summary>
+    public ScreenField? GetFirstNewInputField()
+    {
+        ScreenField? best = null;
+        int bestPos = int.MaxValue;
+
+        foreach (var field in Fields)
+        {
+            if (field.Attribute.IsBypass || !IsFromCurrentWrite(field)) continue;
+
+            int pos = field.Row * Cols + field.Col;
+            if (pos < bestPos)
+            {
+                bestPos = pos;
                 best = field;
             }
         }

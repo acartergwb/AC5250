@@ -595,7 +595,9 @@ internal class MainForm : Form
         RemoveTab(ctx);
     }
 
-    // Socket dropped (host, error, or user Disconnect): keep the tab as [Closed] and toast.
+    // Socket dropped (host, error, or user Disconnect): keep the tab as [Closed], dim the dead
+    // screen behind a "session closed" card, and toast (the toast is the only signal when the
+    // closed tab is in the background — the card only shows on its own tab).
     internal void HandleDisconnected(TerminalSession session, string reason)
     {
         var ctx = FindContextBySession(session);
@@ -604,10 +606,53 @@ internal class MainForm : Form
         {
             tc.HostInfo = $"Disconnected: {reason}";
             tc.Invalidate();
+            ShowSessionClosedNotice(ctx, tc, session.Title, reason);
         }
         int idx = _tabBar.FindTabByTag(ctx);
         if (idx >= 0) _tabBar.SetTabTitle(idx, $"[Closed] {session.Title}");
         ShowDisconnectToast(session.Title, reason);
+    }
+
+    /// <summary>Dim the closed session's terminal and put a non-blocking notice over it. The
+    /// notice is a CHILD of the terminal control, not a dialog: it hides and shows with its own
+    /// tab, and the menu, the other tabs, other windows, and MCP-driven sessions keep working.</summary>
+    private void ShowSessionClosedNotice(TabContext ctx, TerminalControl tc, string title, string reason)
+    {
+        foreach (var stale in tc.Controls.OfType<SessionClosedNotice>().ToArray())
+        {
+            tc.Controls.Remove(stale);
+            stale.Dispose();
+        }
+
+        tc.Dimmed = true;
+        var notice = new SessionClosedNotice(title, reason);
+        // Deferred: Return to Home disposes the terminal that owns this notice, so let the
+        // button's click handler unwind first (same reason RemoveTab defers its Close).
+        notice.ReturnHome += (_, _) => BeginInvoke(new Action(() => ReturnTabToHome(ctx)));
+        notice.Dismissed += (_, _) => tc.Dimmed = false;
+        tc.Controls.Add(notice);
+        notice.BringToFront();
+        notice.FocusPrimary();
+    }
+
+    /// <summary>Turn a tab back into a Home tab: tear down its (dead) session and swap the
+    /// terminal for a fresh WelcomePanel wired to THIS window. Reached from the "session closed"
+    /// notice's Return to Home button.</summary>
+    private void ReturnTabToHome(TabContext ctx)
+    {
+        if (ctx.Session is { } dead)
+        {
+            ctx.Session = null;                  // suppress HandleRemoved's own tab removal
+            _sessionManager.CloseSession(dead);
+        }
+
+        var welcome = new WelcomePanel { Dock = DockStyle.Fill, Visible = false };
+        SwapTabContent(ctx, welcome);            // disposes the terminal (and the notice with it)
+        WireHome(ctx, welcome);
+
+        int idx = _tabBar.FindTabByTag(ctx);
+        if (idx >= 0) _tabBar.SetTabTitle(idx, "Home");
+        ActivateTab(ctx);
     }
 
     internal void HandleStatus(TerminalSession session, string msg)
@@ -1430,6 +1475,151 @@ internal sealed class ToastNotification : Panel
         g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
         using var accent = new SolidBrush(DarkTheme.Danger);
         g.FillRectangle(accent, 0, 0, 3, Height);
+    }
+}
+
+/// <summary>
+/// Non-blocking "this session is closed" card, shown over a dimmed terminal when a tab's
+/// connection drops. Deliberately NOT a dialog: it lives as a child of the tab's
+/// <see cref="TerminalControl"/>, so it hides and shows with its own tab and never blocks the
+/// menu, the other tabs, other windows, or MCP-driven sessions. Offers Return to Home (turn the
+/// tab back into the launcher) and Dismiss (clear the card so the last screen can be read).
+/// </summary>
+internal sealed class SessionClosedNotice : Panel
+{
+    public event EventHandler? ReturnHome;
+    public event EventHandler? Dismissed;
+
+    private readonly Button _homeButton;
+    private Control? _wiredParent;
+
+    private const int CardW = 420, CardH = 176, Pad = 20;
+
+    public SessionClosedNotice(string sessionTitle, string reason)
+    {
+        DoubleBuffered = true;
+        Size = new Size(CardW, CardH);
+        BackColor = DarkTheme.Surface;
+        Anchor = AnchorStyles.None;
+
+        int innerW = CardW - Pad * 2;
+
+        Controls.Add(new Label
+        {
+            Text = "Session closed",
+            Location = new Point(Pad, 16),
+            Size = new Size(innerW, 24),
+            ForeColor = DarkTheme.TextPrimary,
+            Font = new Font("Segoe UI", 12f, FontStyle.Bold),
+            BackColor = Color.Transparent,
+        });
+
+        Controls.Add(new Label
+        {
+            Text = sessionTitle,
+            Location = new Point(Pad, 42),
+            Size = new Size(innerW, 18),
+            ForeColor = DarkTheme.TextSecondary,
+            Font = DarkTheme.UIFont,
+            BackColor = Color.Transparent,
+            AutoEllipsis = true,
+        });
+
+        Controls.Add(new Label
+        {
+            Text = reason,
+            Location = new Point(Pad, 66),
+            Size = new Size(innerW, 46),
+            ForeColor = DarkTheme.TextMuted,
+            Font = DarkTheme.UIFont,
+            BackColor = Color.Transparent,
+        });
+
+        _homeButton = new Button
+        {
+            Text = "Return to Home",
+            Location = new Point(CardW - Pad - 140, 122),
+            Size = new Size(140, 32),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = DarkTheme.AccentDim,
+            ForeColor = Color.White,
+            Font = DarkTheme.UIFontBold,
+        };
+        _homeButton.FlatAppearance.BorderColor = DarkTheme.Accent;
+        _homeButton.Click += (_, _) => ReturnHome?.Invoke(this, EventArgs.Empty);
+        Controls.Add(_homeButton);
+
+        var dismiss = new Button
+        {
+            Text = "Dismiss",
+            Location = new Point(CardW - Pad - 140 - 8 - 86, 122),
+            Size = new Size(86, 32),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = DarkTheme.SurfaceLighter,
+            ForeColor = DarkTheme.TextPrimary,
+            Font = DarkTheme.UIFont,
+        };
+        dismiss.FlatAppearance.BorderColor = DarkTheme.Border;
+        // Deferred: Dismiss disposes this panel, which owns the button raising the event.
+        dismiss.Click += (_, _) => BeginInvoke(new Action(Dismiss));
+        Controls.Add(dismiss);
+    }
+
+    /// <summary>Put the caret on the primary action so Enter/Space work without a click.</summary>
+    public void FocusPrimary()
+    {
+        if (IsHandleCreated) BeginInvoke(() => { if (!IsDisposed) _homeButton.Focus(); });
+        else _homeButton.Select();
+    }
+
+    // Center in the terminal and stay centered as the window resizes. Anchor alone only keeps
+    // the card's relative position, which drifts off-center on a large resize.
+    protected override void OnParentChanged(EventArgs e)
+    {
+        base.OnParentChanged(e);
+        if (_wiredParent != null) _wiredParent.Resize -= OnParentResize;
+        _wiredParent = Parent;
+        if (_wiredParent != null)
+        {
+            _wiredParent.Resize += OnParentResize;
+            Recenter();
+        }
+    }
+
+    private void OnParentResize(object? sender, EventArgs e) => Recenter();
+
+    private void Recenter()
+    {
+        if (Parent is not { } p) return;
+        Location = new Point(Math.Max(0, (p.ClientSize.Width - Width) / 2),
+                             Math.Max(0, (p.ClientSize.Height - Height) / 2));
+    }
+
+    private void Dismiss()
+    {
+        Dismissed?.Invoke(this, EventArgs.Empty);
+        Parent?.Controls.Remove(this);
+        Dispose();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        var g = e.Graphics;
+        using var border = new Pen(DarkTheme.Border);
+        g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
+        using var accent = new SolidBrush(DarkTheme.Danger);
+        g.FillRectangle(accent, 0, 0, 3, Height);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing && _wiredParent != null)
+        {
+            _wiredParent.Resize -= OnParentResize;
+            _wiredParent = null;
+        }
+        base.Dispose(disposing);
     }
 }
 
