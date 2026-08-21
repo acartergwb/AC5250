@@ -19,6 +19,12 @@ public class TerminalControl : UserControl
     private string _hostInfo = "Disconnected";
     private const int StatusBarHeight = 22;
 
+    // Scrim drawn over the terminal grid when the session behind it has closed, so the last
+    // painted screen still reads as "dead" rather than "frozen". Only the grid dims — the
+    // status bar stays legible because it carries the disconnect reason.
+    private bool _dimmed;
+    private static readonly Color DimScrim = Color.FromArgb(168, 8, 8, 10);
+
     // Mouse text selection (linear / stream, like a text editor). Coordinates are cell
     // (row, col); the caret cell is inclusive. _hasSelection is set only once the drag
     // reaches a different cell than the anchor, so a plain click stays a cursor move.
@@ -89,6 +95,30 @@ public class TerminalControl : UserControl
     {
         get => _hostInfo;
         set { _hostInfo = value; Invalidate(); }
+    }
+
+    /// <summary>Dim the terminal grid (the session behind it has closed). Stops the cursor
+    /// blink too — a blinking cursor on a dead session reads as a live one.</summary>
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public bool Dimmed
+    {
+        get => _dimmed;
+        set
+        {
+            if (_dimmed == value) return;
+            _dimmed = value;
+            if (_dimmed)
+            {
+                _cursorTimer.Stop();
+                _cursorVisible = false;
+            }
+            else if (Focused)
+            {
+                _cursorVisible = true;
+                _cursorTimer.Start();
+            }
+            Invalidate();
+        }
     }
 
     public void AttachBuffer(ScreenBuffer buffer)
@@ -223,6 +253,12 @@ public class TerminalControl : UserControl
             e.Graphics, _buffer, _terminalFont,
             _cellWidth, _cellHeight, _offsetX, _offsetY, _colors, _cursorVisible);
 
+        if (_dimmed)
+        {
+            using var scrim = new SolidBrush(DimScrim);
+            e.Graphics.FillRectangle(scrim, 0, 0, Width, Math.Max(0, Height - StatusBarHeight));
+        }
+
         TerminalRenderer.RenderStatusBar(
             e.Graphics, _buffer, _statusFont,
             Height - StatusBarHeight, Width, StatusBarHeight, _colors, _hostInfo);
@@ -278,6 +314,7 @@ public class TerminalControl : UserControl
     protected override void OnGotFocus(EventArgs e)
     {
         base.OnGotFocus(e);
+        if (_dimmed) return;   // closed session: no cursor to blink
         _cursorVisible = true;
         _cursorTimer.Start();
         Invalidate();
