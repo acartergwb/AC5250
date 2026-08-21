@@ -36,11 +36,13 @@ public class DataStreamParser
         switch (opcode)
         {
             case TelnetConstants.OPCODE_OUTPUT:
+                _screen.BeginWrite();
                 ParseOutput(record, TelnetConstants.HEADER_LENGTH);
                 break;
 
             case TelnetConstants.OPCODE_PUT_GET:
                 _screen.CursorAddressed = false; // track whether this write positions the cursor
+                _screen.BeginWrite();            // stamp the fields THIS write defines
                 try
                 {
                     ParseOutput(record, TelnetConstants.HEADER_LENGTH);
@@ -172,29 +174,49 @@ public class DataStreamParser
     }
 
     /// <summary>
-    /// Decide where the cursor sits after a PUT_GET invite. If the host explicitly positioned
-    /// it (Insert/Move Cursor) and it's on an input field, honor that. If the host gave NO
-    /// cursor order, snap the cursor to the START of the field it's in — so it returns to the
-    /// beginning of the line (ACS behavior); many S2K command screens repaint with only a
-    /// Read-MDT-Fields and no cursor order, otherwise leaving the cursor where the operator
-    /// last typed. If the cursor isn't on an enterable field, fall back to the first input field.
+    /// Decide where the cursor sits after a PUT_GET invite.
+    ///
+    /// If the host explicitly positioned it (Insert/Move Cursor) and it landed on an enterable
+    /// field, honor that. If it addressed a cell that ISN'T enterable, advance to the next input
+    /// field forward from THERE — that's the field the host was aiming at (e.g. an address on a
+    /// pop-up's border or a protected cell inside it). Falling back to the screen's first field
+    /// instead teleported the operator out of the window.
+    ///
+    /// If the host gave NO cursor order and the cursor already sits in a field THIS write
+    /// defined, snap it to the START of that field — so it returns to the beginning of the line
+    /// (ACS behavior); many S2K command screens repaint with only a Read-MDT-Fields and no cursor
+    /// order, otherwise leaving the cursor where the operator last typed.
+    ///
+    /// If it sits in a field left over from an EARLIER write while this write defined a fresh set
+    /// of input fields, this is a pop-up window painted over a screen whose format table was not
+    /// cleared: the old screen's fields are still enterable, so nothing looked wrong, but the
+    /// operator was typing underneath the box. Move into the window's first field.
     /// </summary>
     private void PositionCursorAfterInvite()
     {
         var field = _screen.GetFieldForCursor();
         bool onInput = field != null && !field.Attribute.IsBypass;
 
-        if (!_screen.CursorAddressed && onInput)
+        if (_screen.CursorAddressed)
         {
-            _screen.MoveCursorTo(field!.Row, field.Col); // host left the cursor to us: home to field start
+            if (onInput) return;                                   // host put us on a field — honor it
+            var nearest = _screen.GetNextInputField(_screen.CursorRow, _screen.CursorCol);
+            if (nearest != null) _screen.MoveCursorTo(nearest.Row, nearest.Col);
             return;
         }
-        if (!onInput)
+
+        if (onInput)
         {
-            var firstField = _screen.GetNextInputField(0, 0);
-            if (firstField != null)
-                _screen.MoveCursorTo(firstField.Row, firstField.Col);
+            // Only jump when this write actually created input fields elsewhere — a repaint
+            // that defines none must leave the cursor in the field it's already in.
+            var newest = _screen.IsFromCurrentWrite(field!) ? null : _screen.GetFirstNewInputField();
+            if (newest != null) _screen.MoveCursorTo(newest.Row, newest.Col);
+            else _screen.MoveCursorTo(field!.Row, field.Col);      // home to this field's start
+            return;
         }
+
+        var target = _screen.GetFirstNewInputField() ?? _screen.GetNextInputField(0, 0);
+        if (target != null) _screen.MoveCursorTo(target.Row, target.Col);
     }
 
     private int ParseWriteToDisplay(byte[] record, int offset)
@@ -272,10 +294,15 @@ public class DataStreamParser
                     break;
 
                 case TelnetConstants.ORDER_MC:
+                    // Move Cursor: 0x14 followed by row + col, 1-based like every other
+                    // 5250 address (SBA/RA/EA/IC all decrement). This passed the raw bytes
+                    // through, so a host that placed a pop-up's cursor with MC landed one
+                    // row down and one column right — off the field, leaving the window
+                    // without the cursor until the operator clicked or tabbed into it.
                     if (offset + 2 < record.Length)
                     {
-                        int row = record[offset + 1];
-                        int col = record[offset + 2];
+                        int row = record[offset + 1] - 1;
+                        int col = record[offset + 2] - 1;
                         _screen.SetCursorAddress(row, col);
                         offset += 3;
                     }
